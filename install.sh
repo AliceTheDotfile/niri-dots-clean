@@ -32,12 +32,13 @@ for dir in "${configs[@]}"; do
 done
 
 echo "installing wallfliper..."
-mkdir -p "$HOME/.config/wallfliper" "$HOME/.local/share/wallfliper"
 rm -rf "$HOME/.config/wallfliper" "$HOME/.local/share/wallfliper"
+mkdir -p "$HOME/.config/wallfliper" "$HOME/.local/share/wallfliper"
 cp -a "$DOTFILES/wallfliper/config.json" "$HOME/.config/wallfliper/config.json"
+sed -i "s#"wallpaper_dir": ".*"#"wallpaper_dir": "$HOME/Wallpapers"#" "$HOME/.config/wallfliper/config.json"
 rsync -a --exclude="config.json" "$DOTFILES/wallfliper/" "$HOME/.local/share/wallfliper/"
-echo "installing scripts..."
 
+echo "installing scripts..."
 for file in "$DOTFILES"/local/bin/*; do
     [ -f "$file" ] || continue
     cp -a "$file" "$HOME/.local/bin/"
@@ -45,7 +46,6 @@ for file in "$DOTFILES"/local/bin/*; do
 done
 
 echo "installing wallpapers..."
-
 for file in "$DOTFILES"/Wallpapers/*; do
     [ -e "$file" ] || continue
 
