@@ -1,0 +1,7 @@
+#!/bin/sh
+
+if pgrep -x neowall >/dev/null 2>&1; then
+    printf '{"text":"NEOWALL ON","class":"on","tooltip":"NeoWall is running — click to turn it off"}\n'
+else
+    printf '{"text":"NEOWALL OFF","class":"off","tooltip":"NeoWall is stopped — click to turn it on"}\n'
+fi

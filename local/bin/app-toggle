@@ -1,0 +1,16 @@
+
+#!/bin/bash
+
+APP="$1"
+shift
+
+# Does the window already exist?
+if wlrctl toplevel find "app_id:$APP" >/dev/null 2>&1; then
+    # Restore/focus it.
+    wlrctl toplevel focus "app_id:$APP"
+    exit 0
+fi
+
+# Otherwise launch the application.
+exec "$@"
+

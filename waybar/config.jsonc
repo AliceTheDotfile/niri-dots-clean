@@ -1,0 +1,165 @@
+
+{
+  "layer": "top",
+  "position": "top",
+  "height": 36,
+  "spacing": 6,
+
+  "modules-left": [
+    "custom/launcher",
+
+    "custom/taskbar-chromium",
+    "custom/taskbar-org_kde_dolphin",
+    "custom/taskbar-org_kde_kate",
+    "custom/taskbar-kitty",
+    "custom/taskbar-steam",
+    "custom/taskbar-discord",
+    "custom/taskbar-BeamNG_drive",
+    "custom/taskbar-Geometry_Dash",
+    "custom/taskbar-com_obsproject_Studio",
+    "custom/taskbar-org_prismlauncher_PrismLauncher",
+
+    "wlr/taskbar"
+  ],
+
+  "modules-center": [
+    "clock"
+  ],
+
+  "modules-right": [
+    "custom/neowall",
+    "cpu",
+    "memory",
+    "pulseaudio",
+    "tray"
+  ],
+
+  "custom/launcher": {
+    "format": "Start",
+    "tooltip": false,
+    "on-click": "wofi --show drun --location=top_left --x=0 --y=0 --width=300 --height=400"
+  },
+
+  "custom/taskbar-chromium": {
+    "format": " Chromium ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle chromium gtk-launch chromium",
+    "class": "taskbar-app"
+  },
+
+  "custom/taskbar-org_kde_dolphin": {
+    "format": " Dolphin ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle org.kde.dolphin gtk-launch org.kde.dolphin",
+    "class": "taskbar-app"
+  },
+
+  "custom/taskbar-org_kde_kate": {
+    "format": " Kate ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle org.kde.kate gtk-launch org.kde.kate",
+    "class": "taskbar-app"
+  },
+
+  "custom/taskbar-kitty": {
+    "format": " kitty ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle kitty gtk-launch kitty",
+    "class": "taskbar-app"
+  },
+
+  "custom/taskbar-steam": {
+    "format": " Steam ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle steam gtk-launch steam",
+    "class": "taskbar-app"
+  },
+
+  "custom/taskbar-discord": {
+    "format": " Discord ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle discord gtk-launch discord",
+    "class": "taskbar-app"
+  },
+
+  "custom/neowall": {
+  "exec": "~/.local/bin/waybar-neowall",
+  "return-type": "json",
+  "interval": 1,
+  "on-click": "~/.local/bin/toggle-neowall"
+  },
+
+  "custom/taskbar-BeamNG_drive": {
+    "format": " BeamNG.drive ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle BeamNG.drive gtk-launch BeamNG.drive",
+    "class": "taskbar-app"
+  },
+
+  "custom/taskbar-Geometry_Dash": {
+    "format": " Geometry Dash ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle steam_app_322170 steam steam://rungameid/322170",
+    "class": "taskbar-app"
+  },
+
+  "custom/taskbar-com_obsproject_Studio": {
+    "format": " OBS Studio ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle com.obsproject.Studio gtk-launch com.obsproject.Studio",
+    "class": "taskbar-app"
+  },
+
+  "custom/taskbar-org_prismlauncher_PrismLauncher": {
+    "format": " Prism Launcher ",
+    "tooltip": false,
+    "on-click": "~/.local/bin/app-toggle org.prismlauncher.PrismLauncher gtk-launch org.prismlauncher.PrismLauncher",
+    "class": "taskbar-app"
+  },
+
+  "wlr/taskbar": {
+    "format": "{icon}",
+    "icon-size": 20,
+    "tooltip-format": "{title}",
+    "on-click": "activate",
+    "on-click-middle": "close",
+    "on-click-right": "context-menu",
+    "sort-by": "title",
+    "all-outputs": true
+  },
+
+  "clock": {
+    "format": "{:%H:%M:%S}",
+    "tooltip": false,
+    "interval": 1
+  },
+
+  "cpu": {
+    "format": "CPU {usage}%",
+    "tooltip": false,
+    "interval": 1
+  },
+
+  "memory": {
+    "format": "RAM {used:2} GB",
+    "tooltip": false,
+    "interval": 1
+  },
+
+  "pulseaudio": {
+    "format": "VOL {volume}%",
+    "format-muted": "VOL muted",
+    "tooltip": false,
+    "scroll-step": 5,
+    "on-click": "pavucontrol",
+    "on-click-middle": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle",
+    "on-click-right": "pavucontrol"
+  },
+
+  "tray": {
+    "icon-size": 16,
+    "spacing": 6,
+    "tooltip": true
+  }
+}
+

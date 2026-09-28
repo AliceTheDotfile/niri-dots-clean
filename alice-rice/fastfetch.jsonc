@@ -1,0 +1,107 @@
+{
+    "logo": {
+        "type": "file",
+        "source": "/home/alice/.config/alice-rice/fastfetch-logo.txt",
+        "padding": {
+            "top": 1,
+            "right": 4
+        },
+        "color": {
+            "1": "#EF6261",
+            "2": "#B63A6C",
+            "3": "#9B346B",
+            "4": "#67315F"
+        }
+    },
+
+    "display": {
+        "separator": "  ",
+        "color": {
+            "keys": "#B63A6C",
+            "title": "#EF6261",
+            "output": "#C8C0CC"
+        },
+        "key": {
+            "width": 7,
+            "type": "string"
+        }
+    },
+
+    "modules": [
+        {
+            "type": "title",
+            "format": "{user-name}@{host-name}"
+        },
+
+        {
+            "type": "separator",
+            "string": "══════════════════════════",
+            "outputColor": "#5F295D"
+        },
+
+        {
+            "type": "os",
+            "key": "OS",
+            "keyColor": "#B63A6C",
+            "format": "{name}"
+        },
+
+        {
+            "type": "wm",
+            "key": "WM",
+            "keyColor": "#9B346B"
+        },
+
+        {
+            "type": "cpu",
+            "key": "CPU",
+            "keyColor": "#EF6261",
+            "format": "{name}"
+        },
+
+        {
+            "type": "gpu",
+            "key": "GPU",
+            "keyColor": "#B63A6C",
+            "format": "{name}"
+        },
+
+        {
+            "type": "memory",
+            "key": "RAM",
+            "keyColor": "#9B346B"
+        },
+
+        {
+            "type": "uptime",
+            "key": "UP",
+            "keyColor": "#67315F"
+        },
+
+        {
+            "type": "separator",
+            "string": "──────────────────────────",
+            "outputColor": "#2C1F4E"
+        },
+
+        {
+            "type": "shell",
+            "key": "SH",
+            "keyColor": "#5F295D"
+        },
+
+        {
+            "type": "terminal",
+            "key": "TERM",
+            "keyColor": "#67315F"
+        },
+
+        {
+            "type": "separator",
+            "string": "──────────────────────────",
+            "outputColor": "#2C1F4E"
+        },
+
+        "colors"
+    ]
+}

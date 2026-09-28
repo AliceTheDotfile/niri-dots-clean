@@ -1,0 +1,242 @@
+
+/*
+ * NEOWALL / PIXEL-ART WAYBAR
+ *
+ * Palette derived directly from the shader:
+ *
+ * #000000  outside
+ * #2e2e2e  band 1
+ * #5a5a5a  band 2
+ * #868686  band 3
+ * #b3b3b3  brightest band
+ *
+ * Flat shapes. No bevels. No gradients. No rounded UI.
+ */
+
+* {
+    font-family: "Press Start 2P", monospace;
+    font-size: 9px;
+    font-weight: normal;
+}
+
+/* =========================================================
+ *   BAR
+ * ========================================================= */
+
+window#waybar {
+    background: rgba(0, 0, 0, 0.62);
+    color: #b3b3b3;
+}
+
+/* =========================================================
+ *   COMMON PIXEL MODULE
+ * ========================================================= */
+
+/*
+ * These are intentionally FLAT.
+ *
+ * The tiny 2px vertical gaps are what make the modules feel
+ * like individual pixel chunks instead of Windows UI panels.
+ */
+
+#custom-launcher,
+.taskbar-app,
+#wlr-taskbar button,
+#custom-neowall,
+#clock,
+#pulseaudio {
+border: none;
+border-radius: 0;
+
+background: rgba(46, 46, 46, 0.88);
+color: #b3b3b3;
+}
+
+/* =========================================================
+ *   LAUNCHER
+ * ========================================================= */
+
+#custom-launcher {
+min-width: 30px;
+
+margin: 4px 2px 4px 6px;
+padding: 0 9px;
+
+background: rgba(90, 90, 90, 0.90);
+color: #000000;
+}
+
+#custom-launcher:hover {
+background: #868686;
+color: #000000;
+}
+
+/* =========================================================
+ *   PINNED APPS
+ * ========================================================= */
+
+.taskbar-app {
+    min-height: 26px;
+
+    margin: 5px 1px;
+    padding: 0 10px;
+
+    background: rgba(46, 46, 46, 0.82);
+}
+
+.taskbar-app:hover {
+    background: #5a5a5a;
+    color: #000000;
+}
+
+/* =========================================================
+ *   OPEN WINDOWS
+ * ========================================================= */
+
+#wlr-taskbar {
+margin: 0 2px;
+padding: 0;
+}
+
+#wlr-taskbar button {
+min-width: 26px;
+min-height: 26px;
+
+margin: 5px 1px;
+padding: 0 7px;
+
+background: rgba(46, 46, 46, 0.82);
+}
+
+#wlr-taskbar button:hover {
+background: #5a5a5a;
+color: #000000;
+}
+
+#wlr-taskbar button.active {
+background: #868686;
+color: #000000;
+}
+
+/* =========================================================
+ *   NEOWALL
+ * ========================================================= */
+
+/*
+ * OFF:
+ *   dark and quiet
+ *
+ * ON:
+ *   becomes the brightest shader band
+ *
+ * This makes the button look like one of the bright pixels
+ * in the wallpaper rather than a generic settings button.
+ */
+
+#custom-neowall {
+min-height: 26px;
+
+margin: 5px 2px;
+padding: 0 10px;
+
+background: #2e2e2e;
+color: #868686;
+}
+
+#custom-neowall:hover {
+background: #5a5a5a;
+color: #000000;
+}
+
+#custom-neowall.on {
+background: #b3b3b3;
+color: #000000;
+}
+
+#custom-neowall.off {
+background: #2e2e2e;
+color: #686868;
+}
+
+/* =========================================================
+ *   CLOCK
+ * ========================================================= */
+
+#clock {
+margin: 5px 2px;
+padding: 0 11px;
+
+background: rgba(46, 46, 46, 0.76);
+color: #b3b3b3;
+}
+
+/* =========================================================
+ *   CPU / RAM
+ * ========================================================= */
+
+/*
+ * These intentionally don't get a box.
+ *
+ * Floating text looks much more like an overlay in the
+ * shader than putting every single statistic into a card.
+ */
+
+#cpu,
+#memory {
+margin: 5px 2px;
+padding: 0 5px;
+
+color: #868686;
+}
+
+#cpu:hover,
+#memory:hover {
+color: #b3b3b3;
+}
+
+/* =========================================================
+ *   VOLUME
+ * ========================================================= */
+
+#pulseaudio {
+margin: 5px 2px;
+padding: 0 9px;
+
+background: rgba(46, 46, 46, 0.82);
+color: #868686;
+}
+
+#pulseaudio:hover {
+background: #5a5a5a;
+color: #000000;
+}
+
+#pulseaudio.muted {
+background: rgba(0, 0, 0, 0.65);
+color: #5a5a5a;
+}
+
+/* =========================================================
+ *   TRAY
+ * ========================================================= */
+
+#tray {
+margin: 5px 3px 5px 2px;
+padding: 0 5px;
+
+color: #868686;
+}
+
+/* =========================================================
+ *   TEXT RENDERING
+ * ========================================================= */
+
+/*
+ * Keep labels compact and pixel-ish.
+ */
+
+label {
+    padding: 0;
+    margin: 0;
+}
+

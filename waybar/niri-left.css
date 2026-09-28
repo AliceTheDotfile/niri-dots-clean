@@ -1,0 +1,152 @@
+* {
+font-family: "JetBrainsMono Nerd Font";
+font-size: 11px;
+font-weight: normal;
+}
+
+window#waybar {
+    background: rgba(9, 21, 47, 0.94);
+    color: #D9CFE0;
+
+    border: 1px solid #2C1F4E;
+    border-left: 2px solid #EF6261;
+
+    padding: 6px 4px;
+}
+
+tooltip {
+    background: #09152F;
+    color: #D9CFE0;
+    border: 1px solid #5F295D;
+}
+
+tooltip label {
+    color: #D9CFE0;
+}
+
+/* =========================
+ *  WORKSPACES
+ *  ========================= */
+
+#workspaces {
+margin: 2px 0 4px 0;
+}
+
+#workspaces button {
+min-width: 42px;
+min-height: 34px;
+
+padding: 0;
+margin: 2px 0;
+
+color: #9B346B;
+background: transparent;
+
+border: 1px solid #2C1F4E;
+border-radius: 0;
+}
+
+#workspaces button:hover {
+color: #EF6261;
+background: #2C1F4E;
+border-color: #EF6261;
+}
+
+#workspaces button.active {
+color: #EF6261;
+background: #2C1F4E;
+border-color: #EF6261;
+}
+
+#workspaces button.focused {
+color: #EF6261;
+background: #2C1F4E;
+border-color: #EF6261;
+}
+
+#workspaces button.urgent {
+color: #F3EAF2;
+background: #B63A6C;
+border-color: #EF6261;
+}
+
+/* =========================
+ *  GENERIC MODULE BLOCKS
+ *  ========================= */
+
+#clock,
+#cpu,
+#memory,
+#pulseaudio,
+#tray {
+min-width: 46px;
+
+margin: 3px 0;
+padding: 8px 2px;
+
+background: #09152F;
+color: #D9CFE0;
+
+border: 1px solid #2C1F4E;
+border-radius: 0;
+}
+
+#clock:hover,
+#cpu:hover,
+#memory:hover,
+#pulseaudio:hover,
+#tray:hover {
+background: #2C1F4E;
+color: #EF6261;
+border-color: #EF6261;
+}
+
+/* =========================
+ *  CLOCK
+ *  ========================= */
+
+#clock {
+color: #EF6261;
+font-weight: bold;
+}
+
+/* =========================
+ *  CPU / RAM
+ *  ========================= */
+
+#cpu {
+color: #D9CFE0;
+}
+
+#memory {
+color: #D9CFE0;
+}
+
+/* =========================
+ *  AUDIO
+ *  ========================= */
+
+#pulseaudio {
+color: #B63A6C;
+}
+
+#pulseaudio.muted {
+color: #5F295D;
+}
+
+/* =========================
+ *  TRAY
+ *  ========================= */
+
+#tray {
+padding: 5px 2px;
+}
+
+#tray > .passive {
+opacity: 0.75;
+}
+
+#tray > .needs-attention {
+background: #2C1F4E;
+color: #EF6261;
+}

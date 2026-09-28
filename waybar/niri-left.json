@@ -1,0 +1,50 @@
+{
+  "layer": "top",
+  "position": "left",
+  "width": 58,
+  "spacing": 6,
+  "margin-top": 8,
+  "margin-bottom": 8,
+  "margin-left": 8,
+
+  "modules-left": [
+    "niri/workspaces",
+    "clock",
+    "cpu",
+    "memory",
+    "pulseaudio",
+    "tray"
+  ],
+
+  "niri/workspaces": {
+    "format": "{index}",
+    "all-outputs": false,
+    "disable-scroll": false
+  },
+
+  "clock": {
+    "format": "{:%H\\n%M}",
+    "tooltip-format": "{:%A, %B %d, %Y\\n%H:%M:%S}"
+  },
+
+  "cpu": {
+    "format": "CPU\\n{usage}%",
+    "interval": 2
+  },
+
+  "memory": {
+    "format": "RAM\\n{percentage}%",
+    "interval": 2
+  },
+
+  "pulseaudio": {
+    "format": "VOL\\n{volume}%",
+    "format-muted": "MUTE",
+    "on-click": "pavucontrol"
+  },
+
+  "tray": {
+    "icon-size": 16,
+    "spacing": 6
+  }
+}

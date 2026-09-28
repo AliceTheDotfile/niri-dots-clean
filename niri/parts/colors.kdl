@@ -1,0 +1,43 @@
+layout {
+    background-color "#09152F"
+
+    focus-ring {
+        on
+        width 2
+        active-color "#EF6261"
+        inactive-color "#00000000"
+        urgent-color "#B63A6C"
+    }
+
+    border {
+        off
+    }
+
+    shadow {
+        on
+        softness 24
+        spread 4
+        offset x=0 y=6
+        color "#09152FCC"
+        inactive-color "#09152F66"
+    }
+
+    tab-indicator {
+        on
+        hide-when-single-tab
+        gap 5
+        width 4
+        length total-proportion=1.0
+        position "right"
+        gaps-between-tabs 2
+        corner-radius 3
+        active-color "#B63A6C"
+        inactive-color "#2C1F4E"
+        urgent-color "#EF6261"
+    }
+
+    insert-hint {
+        on
+        color "#9B346B99"
+    }
+}

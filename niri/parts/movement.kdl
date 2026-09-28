@@ -1,0 +1,39 @@
+binds {
+    // Focus
+    Mod+Left  { focus-column-left; }
+    Mod+Down  { focus-window-down; }
+    Mod+Up    { focus-window-up; }
+    Mod+Right { focus-column-right; }
+
+    // Move columns
+    Mod+Shift+Left  { move-column-left; }
+    Mod+Shift+Right { move-column-right; }
+
+    // Switch workspaces
+    Mod+Shift+Up   { focus-workspace-up; }
+    Mod+Shift+Down { focus-workspace-down; }
+
+    // Jump to ends
+    Mod+Home { focus-column-first; }
+    Mod+End  { focus-column-last; }
+
+    // Move column to ends
+    Mod+Shift+Home { move-column-to-first; }
+    Mod+Shift+End  { move-column-to-last; }
+
+    // Column manipulation
+    Mod+BracketLeft  { consume-or-expel-window-left; }
+    Mod+BracketRight { consume-or-expel-window-right; }
+
+    Mod+Comma  { consume-window-into-column; }
+    Mod+Period { expel-window-from-column; }
+
+    // Window controls
+    Mod+Q       { close-window; }
+    Mod+F       { maximize-column; }
+    Mod+Shift+F { fullscreen-window; }
+
+    Mod+Space { toggle-window-floating; }
+
+    Mod+E { quit; }
+}

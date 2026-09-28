@@ -1,0 +1,7 @@
+
+
+default {
+    shader living_blobs.glsl
+    pause_on_fullscreen false
+    shader_speed 1.8
+}

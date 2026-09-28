@@ -1,0 +1,16 @@
+overview {
+    zoom 0.40
+
+    workspace-shadow {
+        off
+    }
+}
+
+layout {
+    background-color "transparent"
+}
+
+layer-rule {
+    match namespace="^awww-daemon$"
+    place-within-backdrop true
+}

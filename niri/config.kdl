@@ -1,0 +1,18 @@
+include "parts/input.kdl"
+include "parts/output.kdl"
+include "parts/layout.kdl"
+include "parts/movement.kdl"
+include "parts/apps.kdl"
+include "parts/wallpaper.kdl"
+include "parts/animations.kdl"
+include "parts/colors.kdl"
+include "parts/overview.kdl"
+include "parts/quickshell.kdl"
+include "parts/taskbar.kdl"
+
+prefer-no-csd
+spawn-at-startup "kitty" "--config" "/home/alice/.config/alice-rice/kitty.conf"
+hotkey-overlay {
+    skip-at-startup
+}
+spawn-at-startup "dbus-update-activation-environment" "--systemd" "DISPLAY" "WAYLAND_DISPLAY" "XDG_CURRENT_DESKTOP"

@@ -1,0 +1,7 @@
+#!/bin/sh
+
+if pgrep -x neowall >/dev/null 2>&1; then
+    neowall kill
+else
+    nohup neowall >/dev/null 2>&1 &
+fi

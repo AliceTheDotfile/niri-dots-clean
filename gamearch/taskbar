@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+PINS="$HOME/.config/gamearch/pinned-apps"
+CFG="$HOME/.config/waybar/config.jsonc"
+BASE="$HOME/.config/gamearch"
+
+mkdir -p "$BASE" "$(dirname "$CFG")"
+touch "$PINS"
+
+find_desktop() {
+    local id="$1" f
+    for f in \
+        "$HOME/.local/share/applications/$id.desktop" \
+        "/usr/local/share/applications/$id.desktop" \
+        "/usr/share/applications/$id.desktop"
+    do
+        [ -f "$f" ] && { printf '%s\n' "$f"; return; }
+    done
+
+    find \
+        "$HOME/.local/share/applications" \
+        /usr/local/share/applications \
+        /usr/share/applications \
+        -type f -name "*.desktop" 2>/dev/null |
+        while read -r f; do
+            grep -q "^X-GNOME-UsesNotifications=true" "$f" 2>/dev/null || true
+            basename "$f" .desktop
+        done |
+        grep -Fxq "$id" && printf '%s.desktop\n' "$id"
+}
+
+get_name() {
+    local f="$1" n
+    [ -f "$f" ] || { printf '%s\n' "$2"; return; }
+    n=$(awk -F= '$1=="Name"{print $2; exit}' "$f")
+    printf '%s\n' "${n:-$2}"
+}
+
+rebuild() {
+    local id safe f name
+    local json='{
+  "layer": "top",
+  "position": "top",
+  "height": 36,
+  "spacing": 6,
+  "modules-left": [
+    "custom/launcher"'
+
+    while IFS= read -r id; do
+        [ -z "$id" ] && continue
+        safe=$(printf '%s' "$id" | tr -c '[:alnum:]' '_')
+        json+=',
+    "custom/taskbar-'"$safe"'"'
+    done < "$PINS"
+
+    json+=',
+    "custom/taskbar-add"
+  ],
+  "modules-center": ["clock"],
+  "modules-right": ["cpu", "memory", "tray"],
+
+  "custom/launcher": {
+    "format": "󰣇",
+    "tooltip": false,
+    "on-click": "wofi --show drun --location=top_left --x=6 --y=40 --width=300 --height=400"
+  },
+'
+
+    while IFS= read -r id; do
+        [ -z "$id" ] && continue
+
+        safe=$(printf '%s' "$id" | tr -c '[:alnum:]' '_')
+        f=$(find_desktop "$id")
+        name=$(get_name "$f" "$id")
+
+        name=${name//\\/\\\\}
+        name=${name//\"/\\\"}
+
+        json+='  "custom/taskbar-'"$safe"'": {
+    "format": " '"$name"' ",
+    "tooltip": false,
+    "on-click": "gtk-launch '"$id"'",
+    "on-click-right": "'"$BASE"'/taskbar remove '"$id"'",
+    "class": ["taskbar-app"]
+  },
+'
+    done < "$PINS"
+
+    json+='  "custom/taskbar-add": {
+    "format": " + ",
+    "tooltip": "Add application",
+    "on-click": "'"$BASE"'/taskbar add"
+  },
+
+  "clock": {
+    "format": "{:%H:%M:%S}",
+    "tooltip": false
+  },
+
+  "cpu": {
+    "format": "CPU {usage}%",
+    "tooltip": false
+  },
+
+  "memory": {
+    "format": "RAM {percentage}%",
+    "tooltip": false
+  },
+
+  "tray": {
+    "icon-size": 16,
+    "spacing": 6,
+    "tooltip": true
+  }
+}
+'
+
+    printf '%s\n' "$json" > "$CFG"
+    pkill -SIGUSR2 waybar 2>/dev/null || true
+}
+
+case "${1:-build}" in
+    add)
+        apps=$(
+            find "$HOME/.local/share/applications" /usr/local/share/applications /usr/share/applications \
+                -type f -name '*.desktop' 2>/dev/null |
+            while read -r f; do
+                grep -q '^NoDisplay=true' "$f" && continue
+                grep -q '^Hidden=true' "$f" && continue
+                n=$(awk -F= '$1=="Name"{print $2; exit}' "$f")
+                [ -n "$n" ] && printf '%s\t%s\n' "$n" "$(basename "$f" .desktop)"
+            done | sort -fu
+        )
+
+        choice=$(printf '%s\n' "$apps" | cut -f1 | wofi --dmenu --prompt "Pin application" --width 420)
+        [ -z "$choice" ] && exit 0
+
+        id=$(printf '%s\n' "$apps" | awk -F '\t' -v n="$choice" '$1 == n {print $2; exit}')
+        [ -z "$id" ] && exit 0
+
+        grep -qxF "$id" "$PINS" || printf '%s\n' "$id" >> "$PINS"
+        rebuild
+        ;;
+
+    remove)
+        id="${2:-}"
+        [ -z "$id" ] && exit 1
+
+        f=$(find_desktop "$id")
+        name=$(get_name "$f" "$id")
+
+        choice=$(printf 'Remove %s\nCancel\n' "$name" | wofi --dmenu --prompt "Taskbar" --width 300)
+        [ "$choice" = "Remove $name" ] || exit 0
+
+        grep -vxF "$id" "$PINS" > "$PINS.tmp" || true
+        mv "$PINS.tmp" "$PINS"
+        rebuild
+        ;;
+
+    build)
+        rebuild
+        ;;
+esac
