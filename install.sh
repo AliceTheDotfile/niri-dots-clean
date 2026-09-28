@@ -35,7 +35,7 @@ echo "installing wallfliper..."
 rm -rf "$HOME/.config/wallfliper" "$HOME/.local/share/wallfliper"
 mkdir -p "$HOME/.config/wallfliper" "$HOME/.local/share/wallfliper"
 cp -a "$DOTFILES/wallfliper/config.json" "$HOME/.config/wallfliper/config.json"
-sed -i "s#"wallpaper_dir": ".*"#"wallpaper_dir": "$HOME/Wallpapers"#" "$HOME/.config/wallfliper/config.json"
+sed -i "s|\"wallpaper_dir\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"wallpaper_dir\": \"$HOME/Wallpapers\"|" "$HOME/.config/wallfliper/config.json"
 rsync -a --exclude="config.json" "$DOTFILES/wallfliper/" "$HOME/.local/share/wallfliper/"
 
 echo "installing scripts..."
