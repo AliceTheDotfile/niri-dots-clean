@@ -19,7 +19,6 @@ configs=(
     niri
     quickshell
     qt6ct
-    wallfliper
     waybar
     wofi
 )
@@ -32,6 +31,11 @@ for dir in "${configs[@]}"; do
     cp -a "$DOTFILES/$dir" "$HOME/.config/$dir"
 done
 
+echo "installing wallfliper..."
+mkdir -p "$HOME/.config/wallfliper" "$HOME/.local/share/wallfliper"
+rm -rf "$HOME/.config/wallfliper" "$HOME/.local/share/wallfliper"
+cp -a "$DOTFILES/wallfliper/config.json" "$HOME/.config/wallfliper/config.json"
+rsync -a --exclude="config.json" "$DOTFILES/wallfliper/" "$HOME/.local/share/wallfliper/"
 echo "installing scripts..."
 
 for file in "$DOTFILES"/local/bin/*; do
