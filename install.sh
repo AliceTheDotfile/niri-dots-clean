@@ -20,11 +20,11 @@ CONFIGS=(alice-rice btop cava environment.d fastfetch fontconfig gamearch gtk-3.
 # files/folders installed to ~/<path> (stored under home/ in the repo)
 HOME_ITEMS=(.bashrc .bash_profile .config/kdeglobals
             .local/share/color-schemes/AliceNight.colors
-            .local/share/themes/AliceNight .local/share/themes/AliceNight-Dark-hdpi .local/share/themes/AliceNight-Dark-xhdpi
+            .local/share/themes/AliceNight
             .icons/Bibata-Material-Cloud)
 
 # ---------- packages (edit these lists) ----------
-PKGS=(niri waybar kitty cava btop fastfetch qt6ct nwg-look kvantum papirus-icon-theme swaync starship
+PKGS=(niri waybar kitty cava btop fastfetch qt6ct nwg-look kvantum papirus-icon-theme swaync
       brightnessctl playerctl grim slurp wl-clipboard rsync jq dconf xwayland-satellite pyside6
       ttf-hack noto-fonts noto-fonts-emoji otf-atkinsonhyperlegiblemono-nerd woff2-font-awesome)
 AUR_PKGS=(quickshell awww)

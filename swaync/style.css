@@ -1,0 +1,740 @@
+
+/* ============================================================
+ *   ALICE RICE / SWAYNC
+ *   ============================================================ */
+
+@define-color bg              #09152F;
+@define-color bg_transparent  rgba(9, 21, 47, 0.96);
+
+@define-color fg              #D9CFE0;
+@define-color fg_bright       #F3EAF2;
+
+@define-color selection       #2C1F4E;
+@define-color accent          #EF6261;
+
+@define-color pink            #B63A6C;
+@define-color rose            #9B346B;
+
+@define-color violet          #5F295D;
+@define-color purple          #67315F;
+
+@define-color navy            #0F183D;
+
+@define-color border          #5F295D;
+@define-color border_active   #EF6261;
+
+@define-color critical        #EF6261;
+
+
+/* ============================================================
+ *   GLOBAL
+ *   ============================================================ */
+
+* {
+    font-family: "JetBrainsMono Nerd Font";
+
+    color: @fg;
+
+    text-shadow: none;
+
+    outline: none;
+}
+
+window {
+    background: transparent;
+}
+
+
+/* ============================================================
+ *   CONTROL CENTER
+ *   ============================================================ */
+
+.control-center {
+    background: @bg_transparent;
+
+    border: 2px solid @border;
+
+    border-radius: 0;
+
+    padding: 8px;
+
+    box-shadow: none;
+
+    outline: none;
+}
+
+
+/* ============================================================
+ *   NOTIFICATION ROW
+ *   ============================================================ */
+
+.notification-row {
+    margin: 0;
+    padding: 0;
+
+    background: transparent;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.notification-row:hover,
+.notification-row:focus,
+.notification-row:active {
+    background: transparent;
+
+    outline: none;
+    box-shadow: none;
+}
+
+
+/* ============================================================
+ *   NOTIFICATION
+ *   ============================================================ */
+
+.notification {
+    margin: 5px 2px;
+    padding: 0;
+
+    background: @bg;
+
+    border: 2px solid @violet;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.notification:hover {
+    background: @bg;
+
+    border: 2px solid @accent;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.notification:focus,
+.notification:active {
+    background: @bg;
+
+    border: 2px solid @accent;
+
+    outline: none;
+    box-shadow: none;
+}
+
+
+/* ============================================================
+ *   NOTIFICATION CONTENT
+ *   ============================================================ */
+
+.notification-content {
+    padding: 9px;
+
+    background: @bg;
+
+    border: none;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.notification-content:hover,
+.notification-content:focus,
+.notification-content:active {
+    background: @bg;
+
+    border: none;
+
+    outline: none;
+    box-shadow: none;
+}
+
+
+/* ============================================================
+ *   APP NAME
+ *   ============================================================ */
+
+.app-name {
+    color: @rose;
+
+    font-size: 9px;
+    font-weight: bold;
+
+    outline: none;
+}
+
+.app-name:hover {
+    color: @accent;
+}
+
+
+/* ============================================================
+ *   SUMMARY
+ *   ============================================================ */
+
+.summary {
+    color: @fg_bright;
+
+    font-size: 10px;
+    font-weight: bold;
+
+    outline: none;
+}
+
+.summary:hover {
+    color: @accent;
+}
+
+
+/* ============================================================
+ *   BODY
+ *   ============================================================ */
+
+.body {
+    color: @fg;
+
+    font-size: 9px;
+
+    outline: none;
+}
+
+.body:hover {
+    color: @fg;
+}
+
+
+/* ============================================================
+ *   TIMESTAMP
+ *   ============================================================ */
+
+.time {
+    color: @purple;
+
+    font-size: 8px;
+
+    outline: none;
+}
+
+
+/* ============================================================
+ *   IMAGE / ICON
+ *   ============================================================ */
+
+.notification-image {
+    margin-right: 8px;
+}
+
+
+/* ============================================================
+ *   CLOSE BUTTON
+ *   ============================================================ */
+
+.close-button {
+    min-width: 20px;
+    min-height: 20px;
+
+    margin-top: 8px;
+    margin-right: 8px;
+
+    padding: 0;
+
+    background: transparent;
+
+    border: none;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @fg;
+}
+
+.close-button:hover,
+.close-button:focus,
+.close-button:active {
+    background: transparent;
+
+    border: none;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @accent;
+}
+
+
+/* ============================================================
+ *   DEFAULT ACTION
+ *   ============================================================ */
+
+.notification-default-action,
+.notification-action {
+    margin: 0;
+    padding: 0;
+
+    background: transparent;
+
+    border: none;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @fg;
+}
+
+.notification-default-action:hover,
+.notification-default-action:focus,
+.notification-default-action:active,
+.notification-action:hover,
+.notification-action:focus,
+.notification-action:active {
+    background: @selection;
+
+    border: none;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @accent;
+}
+
+
+/* ============================================================
+ *   CRITICAL
+ *   ============================================================ */
+
+.notification.critical {
+    border: 2px solid @accent;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.notification.critical .app-name {
+    color: @accent;
+}
+
+
+/* ============================================================
+ *   TITLE
+ *   ============================================================ */
+
+.widget-title {
+    margin: 0 0 6px 0;
+    padding: 7px 9px;
+
+    background: @navy;
+
+    border: 1px solid @violet;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.widget-title > label {
+    color: @fg_bright;
+
+    font-size: 10px;
+    font-weight: bold;
+}
+
+.widget-title > button {
+    min-width: 58px;
+    min-height: 22px;
+
+    padding: 2px 8px;
+
+    background: @bg;
+
+    border: 1px solid @purple;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @rose;
+
+    font-size: 8px;
+    font-weight: bold;
+}
+
+.widget-title > button:hover,
+.widget-title > button:focus {
+    background: @selection;
+
+    border-color: @accent;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @accent;
+}
+
+
+/* ============================================================
+ *   DO NOT DISTURB
+ *   ============================================================ */
+
+.widget-dnd {
+    margin: 0 0 6px 0;
+    padding: 7px 9px;
+
+    background: @navy;
+
+    border: 1px solid @violet;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.widget-dnd > label {
+    color: @fg;
+
+    font-size: 9px;
+    font-weight: bold;
+}
+
+.widget-dnd > switch {
+    min-width: 36px;
+    min-height: 18px;
+
+    background: @bg;
+
+    border: 1px solid @purple;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.widget-dnd > switch:checked {
+    background: @selection;
+
+    border-color: @accent;
+}
+
+.widget-dnd > switch slider {
+    min-width: 12px;
+    min-height: 12px;
+
+    margin: 2px;
+
+    background: @violet;
+
+    border-radius: 0;
+
+    outline: none;
+}
+
+.widget-dnd > switch:checked slider {
+    background: @accent;
+}
+
+
+/* ============================================================
+ *   NOTIFICATIONS WIDGET
+ *   ============================================================ */
+
+.widget-notifications {
+    margin: 0;
+    padding: 0;
+
+    background: transparent;
+
+    border: none;
+    outline: none;
+    box-shadow: none;
+}
+
+
+/* ============================================================
+ *   EMPTY STATE
+ *   ============================================================ */
+
+.blank-window {
+    background: @bg;
+
+    border: none;
+    outline: none;
+}
+
+.blank-window label {
+    color: @purple;
+
+    font-size: 9px;
+    font-weight: bold;
+}
+
+
+/* ============================================================
+ *   SCROLLBARS
+ *   ============================================================ */
+
+scrollbar {
+    background: transparent;
+
+    border: none;
+    outline: none;
+}
+
+scrollbar trough {
+    background: @navy;
+
+    border: none;
+    border-radius: 0;
+
+    outline: none;
+}
+
+scrollbar slider {
+    min-width: 4px;
+
+    background: @rose;
+
+    border: none;
+    border-radius: 0;
+
+    outline: none;
+}
+
+scrollbar slider:hover {
+    background: @accent;
+}
+
+
+/* ============================================================
+ *   TEXT ENTRY / REPLIES
+ *   ============================================================ */
+
+text {
+    background: @bg;
+
+    border: 1px solid @violet;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @fg;
+}
+
+text:focus {
+    border-color: @accent;
+
+    outline: none;
+    box-shadow: none;
+}
+
+
+/* ============================================================
+ *   ACTION BUTTONS
+ *   ============================================================ */
+
+.notification-action {
+    border-top: 1px solid @violet;
+
+    background: @bg;
+
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @fg;
+}
+
+.notification-action:hover,
+.notification-action:focus {
+    background: @selection;
+
+    color: @accent;
+
+    outline: none;
+    box-shadow: none;
+}
+
+
+/* ============================================================
+ *   MPRIS
+ *   ============================================================ */
+
+.widget-mpris {
+    padding: 8px;
+
+    background: @bg;
+
+    border: 1px solid @violet;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.widget-mpris-player {
+    padding: 8px;
+
+    background: @navy;
+
+    border: 1px solid @purple;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+}
+
+.widget-mpris-player button {
+    background: @bg;
+
+    border: 1px solid @violet;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @fg;
+}
+
+.widget-mpris-player button:hover,
+.widget-mpris-player button:focus {
+    background: @selection;
+
+    border-color: @accent;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @accent;
+}
+
+
+/* ============================================================
+ *   BUTTON GRID
+ *   ============================================================ */
+
+.widget-buttons-grid {
+    padding: 4px;
+
+    background: transparent;
+
+    border: none;
+    outline: none;
+}
+
+.widget-buttons-grid > flowbox > flowboxchild > button {
+    min-height: 30px;
+
+    background: @bg;
+
+    border: 1px solid @violet;
+    border-radius: 0;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @fg;
+}
+
+.widget-buttons-grid > flowbox > flowboxchild > button:hover,
+.widget-buttons-grid > flowbox > flowboxchild > button:focus {
+    background: @selection;
+
+    border-color: @accent;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @accent;
+}
+
+.widget-buttons-grid > flowbox > flowboxchild > button:checked {
+    background: @selection;
+
+    border-color: @accent;
+
+    outline: none;
+    box-shadow: none;
+
+    color: @accent;
+}
+
+
+/* ============================================================
+ *   SLIDERS
+ *   ============================================================ */
+
+scale {
+    outline: none;
+}
+
+scale trough {
+    min-height: 4px;
+
+    background: @navy;
+
+    border: none;
+    border-radius: 0;
+
+    outline: none;
+}
+
+scale highlight {
+    background: @rose;
+
+    border: none;
+    border-radius: 0;
+
+    outline: none;
+}
+
+scale slider {
+    min-width: 10px;
+    min-height: 10px;
+
+    background: @accent;
+
+    border: none;
+    border-radius: 0;
+
+    outline: none;
+}
+
+
+/* ============================================================
+ *   FORCE EVERYTHING SQUARE
+ *   ============================================================ */
+
+button,
+switch,
+    entry,
+text,
+progressbar,
+scale,
+menu,
+tooltip {
+    border-radius: 0;
+}
+
+
+/* ============================================================
+ *   KILL GTK'S DEFAULT FOCUS / FRAME STYLING
+ *   ============================================================ */
+
+*:focus {
+    outline: none;
+    box-shadow: none;
+}
+
+button:focus,
+button:active,
+button:hover {
+    outline: none;
+    box-shadow: none;
+}
+

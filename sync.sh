@@ -5,7 +5,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 CFG=(alice-rice btop cava environment.d fastfetch fontconfig gamearch gtk-3.0 gtk-4.0 Kvantum niri qt6ct swaync waybar)
 HOME_ITEMS=(.bashrc .bash_profile .config/kdeglobals
             .local/share/color-schemes/AliceNight.colors
-            .local/share/themes/AliceNight .local/share/themes/AliceNight-Dark-hdpi .local/share/themes/AliceNight-Dark-xhdpi
+            .local/share/themes/AliceNight
             .icons/Bibata-Material-Cloud)
 BIN=(wallfliper sun-wallpaper.sh app-toggle lid-fade sysdash)
 EXC=(--exclude=.qmlls.ini --exclude=__pycache__ --exclude='*.log' --exclude='*.bak')
