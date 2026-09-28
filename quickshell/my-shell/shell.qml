@@ -16,7 +16,10 @@ ShellRoot {
             }
 
             TimeWidget {
-                targetScreen: modelData
+                 targetScreen: modelData
+
+
+
             }
         }
     }

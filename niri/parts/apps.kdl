@@ -1,9 +1,10 @@
 binds {
     Super+K { spawn "kate"; }
-    Super+T { spawn "kitty" "--config" "/home/alice/.config/alice-rice/kitty.conf"; }
+    Super+T { spawn "kitty" "--config" "@HOME@/.config/alice-rice/kitty.conf"; }
     Super+B { spawn "chromium"; }
     Super+O { spawn "obs"; }
     Super+D { spawn "dolphin"; }
+    Super+C { spawn "discord"; }
 
     // Steam: Super+C was already taken by Kitty.
     Super+Shift+C { spawn "steam"; }

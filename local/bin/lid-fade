@@ -1,0 +1,33 @@
+#!/bin/bash
+
+STATE="/tmp/lid-brightness"
+
+fade() {
+    FROM=$1
+    TO=$2
+
+    STEPS=25
+    DELAY=0.001
+
+    DIFF=$((TO - FROM))
+
+    for ((i=1; i<=STEPS; i++)); do
+        VALUE=$((FROM + (DIFF * i / STEPS)))
+        brightnessctl set "$VALUE" >/dev/null
+        sleep "$DELAY"
+    done
+}
+
+if [ "$1" = "close" ]; then
+    CURRENT=$(brightnessctl g)
+    echo "$CURRENT" > "$STATE"
+
+    fade "$CURRENT" 0
+
+elif [ "$1" = "open" ]; then
+    if [ -f "$STATE" ]; then
+        OLD=$(cat "$STATE")
+        fade 0 "$OLD"
+        rm "$STATE"
+    fi
+fi

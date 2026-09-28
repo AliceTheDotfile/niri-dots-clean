@@ -1,5 +1,4 @@
-spawn-sh-at-startup "awww-daemon & sleep 1 && awww img /home/alice/Wallpapers/wp14230809-pixel-scenery-wallpapers.png"
-
+spawn-sh-at-startup "awww-daemon"
 binds {
-    Mod+Shift+W { spawn "/home/alice/.local/bin/wallfliper"; }
+    Mod+Shift+W { spawn "@HOME@/.local/bin/wallfliper"; }
 }

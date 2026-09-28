@@ -1,5 +1,5 @@
 {
-  "wallpaper_dir": "/home/alice/Wallpapers",
+  "wallpaper_dir": "@HOME@/Wallpapers",
   "color_hook": "",
   "transition": "random",
   "transition_duration": 1.0

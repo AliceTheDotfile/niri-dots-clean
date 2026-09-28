@@ -23,16 +23,14 @@ Item {
     // Launcher border thickness
     readonly property int borderWidth: 2
 
-    // Animation
-    readonly property int animationDuration: 200
+    // Animation speeds (in ms)
+    readonly property int panelAnimationDuration: 250
+    readonly property int triggerAnimationDuration: 500// Independent speed for bar expansion
 
-    // Higher = trigger expands more slowly.
-    // 1.0 = same speed as launcher
-    // 1.5 = slightly slower
-    // 1.8 = slower
-    // 2.2 = quite slow
-    // 3.0 = very slow
-    readonly property real triggerExpansionCurve: 0.03
+    // Higher = trigger expands more slowly across its own timeline.
+    // 1.0 = linear
+    // 1.2 = smooth, natural tracking
+    readonly property real triggerExpansionCurve: 0.6
 
     // Delay before closing
     readonly property int hideDelay: 300
@@ -63,9 +61,9 @@ Item {
     property bool insideTrigger: false
     property bool insideLauncher: false
 
-    // 0 = closed
-    // 1 = fully open
+    // 0 = closed, 1 = fully open
     property real progress: 0.0
+    property real triggerProgress: 0.0
 
     property real volumeLevel: 0.70
     property bool isMuted: false
@@ -226,7 +224,23 @@ Item {
         revealAnimation.to = 1.0
         revealAnimation.restart()
 
+        triggerAnimation.from = root.triggerProgress
+        triggerAnimation.to = 1.0
+        triggerAnimation.restart()
+
         focusTimer.restart()
+    }
+
+    function close() {
+        root.open = false
+
+        revealAnimation.from = root.progress
+        revealAnimation.to = 0.0
+        revealAnimation.restart()
+
+        triggerAnimation.from = root.triggerProgress
+        triggerAnimation.to = 0.0
+        triggerAnimation.restart()
     }
 
     function scheduleHide() {
@@ -239,18 +253,14 @@ Item {
                 command: [
                     "kitty",
                     "--config",
-                    "/home/alice/.config/alice-rice/kitty.conf"
+                    "@HOME@/.config/alice-rice/kitty.conf"
                 ]
             })
         } else if (entry) {
             entry.execute()
         }
 
-        root.open = false
-
-        revealAnimation.from = root.progress
-        revealAnimation.to = 0.0
-        revealAnimation.restart()
+        root.close()
     }
 
     Timer {
@@ -260,11 +270,7 @@ Item {
 
         onTriggered: {
             if (!root.insideTrigger && !root.insideLauncher) {
-                root.open = false
-
-                revealAnimation.from = root.progress
-                revealAnimation.to = 0.0
-                revealAnimation.restart()
+                root.close()
             }
         }
     }
@@ -285,15 +291,22 @@ Item {
         target: root
         property: "progress"
 
-        duration: root.animationDuration
-        easing.type: Easing.OutCubic
+        duration: root.panelAnimationDuration
+        easing.type: Easing.OutExpo
+    }
+
+    NumberAnimation {
+        id: triggerAnimation
+
+        target: root
+        property: "triggerProgress"
+
+        duration: root.triggerAnimationDuration
+        easing.type: Easing.OutExpo
     }
 
     // ============================================================
     // BOTTOM TRIGGER / BOTTOM BORDER
-    //
-    // THIS IS THE BOTTOM BORDER.
-    // It grows at the same time the launcher rises.
     // ============================================================
 
     PanelWindow {
@@ -322,7 +335,7 @@ Item {
             width:
             root.triggerWidth +
             (root.panelWidth - root.triggerWidth) *
-            Math.pow(root.progress, root.triggerExpansionCurve)
+            Math.pow(root.triggerProgress, root.triggerExpansionCurve)
 
             height: root.triggerHeight
 
@@ -369,7 +382,7 @@ Item {
 
         color: "transparent"
 
-        visible: root.open || root.progress > 0
+        visible: root.open || root.progress > 0 || root.triggerProgress > 0
 
         Item {
             anchors.fill: parent
@@ -462,10 +475,6 @@ Item {
                     }
                 }
 
-                // NO BOTTOM BORDER.
-                //
-                // The bottom trigger bar is the bottom border.
-
                 HoverHandler {
                     onHoveredChanged: {
                         root.insideLauncher = hovered
@@ -479,11 +488,7 @@ Item {
                 }
 
                 Keys.onEscapePressed: {
-                    root.open = false
-
-                    revealAnimation.from = root.progress
-                    revealAnimation.to = 0.0
-                    revealAnimation.restart()
+                    root.close()
                 }
 
                 Keys.onPressed: function(event) {
@@ -643,11 +648,7 @@ Item {
                     }
 
                     Keys.onEscapePressed: {
-                        root.open = false
-
-                        revealAnimation.from = root.progress
-                        revealAnimation.to = 0.0
-                        revealAnimation.restart()
+                        root.close()
                     }
 
                     delegate: Item {

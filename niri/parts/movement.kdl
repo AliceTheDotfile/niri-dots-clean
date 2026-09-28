@@ -9,9 +9,13 @@ binds {
     Mod+Shift+Left  { move-column-left; }
     Mod+Shift+Right { move-column-right; }
 
-    // Switch workspaces
+    /// Switch workspaces
     Mod+Shift+Up   { focus-workspace-up; }
     Mod+Shift+Down { focus-workspace-down; }
+
+    // Switch workspaces with two-finger trackpad scrolling
+    Mod+TouchpadScrollUp   cooldown-ms=150 { focus-workspace-up; }
+    Mod+TouchpadScrollDown cooldown-ms=150 { focus-workspace-down; }
 
     // Jump to ends
     Mod+Home { focus-column-first; }
@@ -36,4 +40,13 @@ binds {
     Mod+Space { toggle-window-floating; }
 
     Mod+E { quit; }
+
+    // Brightness
+    XF86MonBrightnessUp {
+        spawn "brightnessctl" "set" "5%+";
+    }
+
+    XF86MonBrightnessDown {
+        spawn "brightnessctl" "set" "5%-";
+    }
 }

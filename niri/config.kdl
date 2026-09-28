@@ -11,7 +11,7 @@ include "parts/quickshell.kdl"
 include "parts/taskbar.kdl"
 
 prefer-no-csd
-spawn-at-startup "kitty" "--config" "/home/alice/.config/alice-rice/kitty.conf"
+spawn-at-startup "kitty" "--config" "@HOME@/.config/alice-rice/kitty.conf"
 hotkey-overlay {
     skip-at-startup
 }
