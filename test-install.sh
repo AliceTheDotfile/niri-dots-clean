@@ -76,5 +76,12 @@ for t in dunst swaync swaylock rofi wofi starship grim slurp wl-copy wl-paste pl
   grep -rIlw --exclude-dir=.git --exclude=install.sh --exclude=test-install.sh --exclude=sync.sh -- "$t" . >/dev/null 2>&1 && echo "  used: $t"
 done
 
+echo "== 10. themes, swaync, kvantum, bash"
+for p in .bashrc .bash_profile .config/swaync/config.json .config/swaync/style.css .config/Kvantum/kvantum.kvconfig \
+         .local/share/color-schemes/AliceNight.colors .local/share/themes/AliceNight .icons/Bibata-Material-Cloud; do
+  [ -e "$FAKE/$p" ] && ok "installed ~/$p" || bad "missing ~/$p"
+done
+bash -n "$FAKE/.bashrc" && ok ".bashrc parses" || bad ".bashrc has syntax errors"
+
 echo; echo "$pass passed, $fail failed   (fake home kept at $FAKE)"
 exit $((fail > 0))
