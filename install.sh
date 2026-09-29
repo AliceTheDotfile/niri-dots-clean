@@ -9,11 +9,12 @@
 #   ./install.sh --minimal
 #   ./install.sh --no-tui
 #
-# Notes:
-#   - Never touches Waybar.
-#   - Never touches Fastfetch configuration.
-#   - Backs up files before replacing them.
-#   - Adds ~/.local/bin to PATH if it is not already present.
+# IMPORTANT:
+#   - ~/.config/waybar is NEVER touched.
+#   - Waybar is NEVER installed.
+#   - ~/.config/fastfetch is NEVER touched.
+#   - Fastfetch config is NEVER installed.
+#   - Kate session files are NEVER copied.
 #
 
 set -Eeuo pipefail
@@ -66,18 +67,22 @@ Usage:
   ./install.sh --no-tui       Skip the menu
 
 The installer:
+
   - installs Niri
-  - installs required rice dependencies
-  - installs useful desktop applications
+  - installs Quickshell
+  - installs Alice's desktop configs
+  - installs Kate + Kate configuration
   - installs Wallfliper
+  - installs useful desktop applications
   - installs wallpapers
   - backs up replaced files
-  - adds ~/.local/bin to PATH when needed
+  - adds ~/.local/bin to PATH if needed
 
 The installer NEVER manages:
-  - ~/.config/waybar
-  - Waybar package installation
-  - ~/.config/fastfetch
+
+  ~/.config/waybar
+  ~/.config/fastfetch
+  ~/.local/share/kate/anonymous.katesession
 EOF
             exit 0
             ;;
@@ -106,7 +111,7 @@ WHITE='\033[97m'
 GRAY='\033[90m'
 
 # ============================================================
-# Output helpers
+# Output
 # ============================================================
 
 clear_screen() {
@@ -147,6 +152,18 @@ pause_screen() {
     printf "\n${GRAY}press enter to continue...${RESET}"
     read -r
 }
+
+# ============================================================
+# Cleanup
+# ============================================================
+
+cleanup() {
+    printf '\033[0m\n'
+}
+
+trap cleanup EXIT
+
+trap 'fail "installer failed on line $LINENO"; exit 1' ERR
 
 # ============================================================
 # TUI
@@ -213,6 +230,7 @@ menu() {
                     '[A')
                         selected=$((selected - 1))
                         ;;
+
                     '[B')
                         selected=$((selected + 1))
                         ;;
@@ -234,10 +252,14 @@ menu() {
 # Package lists
 # ============================================================
 
-# Core packages required by the rice.
+# ============================================================
+# CORE
+# ============================================================
 #
-# IMPORTANT:
-#   Waybar is intentionally NOT here.
+# These are the packages needed for the actual rice / desktop.
+#
+# WAYBAR IS INTENTIONALLY ABSENT.
+# FASTFETCH IS INTENTIONALLY ABSENT.
 #
 CORE_PKGS=(
     # Compositor
@@ -250,7 +272,8 @@ CORE_PKGS=(
     swaync
     wofi
 
-    # Theming
+    # KDE / theming
+    kate
     qt6ct
     nwg-look
     kvantum
@@ -258,7 +281,7 @@ CORE_PKGS=(
     papirus-icon-theme
     dconf
 
-    # Wallpapers
+    # Wallpaper
     awww
     ffmpeg
     mpv
@@ -283,9 +306,11 @@ CORE_PKGS=(
     xdg-desktop-portal
     xdg-desktop-portal-gtk
 
-    # Networking / Bluetooth
+    # Network
     networkmanager
     network-manager-applet
+
+    # Bluetooth
     bluez
     bluez-utils
     blueman
@@ -304,11 +329,10 @@ CORE_PKGS=(
     woff2-font-awesome
 )
 
-# Nice everyday applications.
-#
-# Fastfetch is allowed as an APPLICATION,
-# but its CONFIG DIRECTORY IS NEVER INSTALLED.
-#
+# ============================================================
+# NICE EVERYDAY APPS
+# ============================================================
+
 NICE_PKGS=(
     # Browser
     firefox
@@ -341,7 +365,10 @@ NICE_PKGS=(
     man-pages
 )
 
-# AUR packages.
+# ============================================================
+# AUR
+# ============================================================
+
 AUR_PKGS=(
     mpvpaper
     neowall-bin
@@ -380,12 +407,16 @@ validate_repo() {
 }
 
 # ============================================================
-# Package manager
+# Commands
 # ============================================================
 
 need_command() {
     command -v "$1" >/dev/null 2>&1
 }
+
+# ============================================================
+# AUR helper
+# ============================================================
 
 find_aur_helper() {
     if need_command yay; then
@@ -419,7 +450,7 @@ install_yay() {
     tmp="$(mktemp -d)"
 
     if (( DRY )); then
-        info "[dry] would clone and build yay"
+        info "[dry] would build yay"
         rm -rf "$tmp"
         return 0
     fi
@@ -435,6 +466,10 @@ install_yay() {
 
     success "yay installed"
 }
+
+# ============================================================
+# Package installation
+# ============================================================
 
 official_package_exists() {
     pacman -Si "$1" >/dev/null 2>&1
@@ -459,6 +494,7 @@ install_official_packages() {
 
     say "installing ${#valid[@]} official packages"
 
+    # Full sync to avoid partial-upgrade situations.
     run sudo pacman -Syu --needed --noconfirm "${valid[@]}"
 
     success "official packages installed"
@@ -474,7 +510,7 @@ install_aur_packages() {
     if helper="$(find_aur_helper)"; then
         :
     else
-        warn "no AUR helper was found"
+        warn "no AUR helper found"
 
         if (( DRY )); then
             info "[dry] would install yay"
@@ -482,7 +518,8 @@ install_aur_packages() {
         fi
 
         printf "\n"
-        printf "${YELLOW}This setup uses a few AUR packages.${RESET}\n"
+        printf "${YELLOW}this setup uses a few AUR packages.${RESET}\n\n"
+
         read -rp "install yay automatically? [Y/n] " answer
         answer="${answer:-Y}"
 
@@ -537,7 +574,7 @@ backup_destination() {
 }
 
 # ============================================================
-# Install files
+# Home token replacement
 # ============================================================
 
 replace_home_token() {
@@ -550,6 +587,10 @@ replace_home_token() {
         | xargs -r sed -i "s|@HOME@|$HOME|g" \
         || true
 }
+
+# ============================================================
+# Place files/directories
+# ============================================================
 
 place() {
     local src="$1"
@@ -593,14 +634,10 @@ install_configs() {
     # ========================================================
     # IMPORTANT
     #
-    # Fastfetch is NOT in this list.
-    # Waybar is NOT in this list.
+    # These are the ONLY ~/.config directories managed here.
     #
-    # Therefore the installer never touches:
-    #
-    #   ~/.config/fastfetch
-    #   ~/.config/waybar
-    #
+    # Fastfetch is deliberately absent.
+    # Waybar is deliberately absent.
     # ========================================================
 
     local configs=(
@@ -624,38 +661,67 @@ install_configs() {
         place "$DOTFILES/$name" "$CONFIG/$name"
     done
 
+    # Quickshell
     place \
         "$DOTFILES/quickshell/my-shell" \
         "$CONFIG/quickshell/my-shell"
 
     success "desktop configs installed"
+
+    # Explicitly report that these remain untouched.
     info "Fastfetch config untouched"
-    info "Waybar completely untouched"
+    info "Waybar config untouched"
 }
 
 # ============================================================
-# Home files
+# Kate + shell + themes
 # ============================================================
 
 install_home_files() {
-    say "installing shell/theme files"
+    say "installing shell, Kate and theme files"
 
     local home_items=(
+        # Shell
         ".bashrc"
         ".bash_profile"
+
+        # KDE global config
         ".config/kdeglobals"
+
+        # ====================================================
+        # Kate
+        #
+        # These are your actual reusable Kate settings.
+        #
+        # We intentionally DO NOT install:
+        #
+        #   ~/.local/share/kate/anonymous.katesession
+        #
+        # because that's session state, not a dotfile.
+        # ====================================================
+
+        ".config/kate"
+        ".config/katerc"
+        ".config/katevirc"
+        ".config/katemetainfos"
+
+        # AliceNight KDE theme
         ".local/share/color-schemes/AliceNight.colors"
         ".local/share/themes/AliceNight"
+
+        # Cursor theme
         ".icons/Bibata-Material-Cloud"
     )
 
     local item
 
     for item in "${home_items[@]}"; do
-        place "$DOTFILES/home/$item" "$HOME/$item"
+        place \
+            "$DOTFILES/home/$item" \
+            "$HOME/$item"
     done
 
-    success "shell and theme files installed"
+    success "shell, Kate and theme files installed"
 }
 
 # ============================================================
@@ -675,6 +741,10 @@ install_wallfliper() {
 
     local launcher="$BIN/wallfliper"
 
+    # If the repo already contains a wallfliper launcher,
+    # local/bin installation below will handle it.
+    #
+    # Otherwise create a simple launcher.
     if [[ ! -e "$DOTFILES/local/bin/wallfliper" ]]; then
 
         if [[ -e "$launcher" ]]; then
@@ -742,6 +812,7 @@ install_wallpapers() {
 
         target="$HOME/Wallpapers/$(basename "$file")"
 
+        # Never replace an existing user wallpaper.
         if [[ -e "$target" ]]; then
             info "keeping existing wallpaper: $(basename "$file")"
             continue
@@ -770,12 +841,20 @@ path_contains_bin() {
     esac
 }
 
+file_contains_path_export() {
+    local file="$1"
+
+    [[ -f "$file" ]] || return 1
+
+    grep -Fq \
+        'export PATH="$HOME/.local/bin:$PATH"' \
+        "$file"
+}
+
 add_path_to_file() {
     local file="$1"
 
-    [[ -e "$file" ]] || run touch "$file"
-
-    if grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "$file" 2>/dev/null; then
+    if file_contains_path_export "$file"; then
         return 0
     fi
 
@@ -784,9 +863,11 @@ add_path_to_file() {
         return 0
     fi
 
+    mkdir -p "$(dirname "$file")"
+
     {
         printf '\n'
-        printf '# Alice dotfiles - local scripts\n'
+        printf '# Alice dotfiles - local user scripts\n'
         printf 'export PATH="$HOME/.local/bin:$PATH"\n'
     } >> "$file"
 }
@@ -794,20 +875,34 @@ add_path_to_file() {
 setup_path() {
     say "checking ~/.local/bin PATH"
 
-    # First check the PATH that the installer is actually running with.
+    # ========================================================
+    # First check the ACTUAL current PATH.
+    # ========================================================
+
     if path_contains_bin; then
         success "~/.local/bin is already in PATH"
         return 0
     fi
 
-    # Make the current installer environment use it immediately.
+    # ========================================================
+    # Add it to the current installer process immediately.
+    # ========================================================
+
     if (( ! DRY )); then
         export PATH="$BIN:$PATH"
     fi
 
-    # Persist it for future shell sessions.
+    # ========================================================
+    # Persist it for future shells.
+    #
+    # Only add the line when it isn't already present.
+    # ========================================================
+
     add_path_to_file "$HOME/.profile"
-    add_path_to_file "$HOME/.bashrc"
+
+    if [[ -f "$HOME/.bashrc" ]]; then
+        add_path_to_file "$HOME/.bashrc"
+    fi
 
     if [[ -f "$HOME/.bash_profile" ]]; then
         add_path_to_file "$HOME/.bash_profile"
@@ -905,8 +1000,13 @@ setup_services() {
 
     [[ "$answer" =~ ^[Yy]$ ]] || return 0
 
-    enable_service "NetworkManager.service" "NetworkManager"
-    enable_service "bluetooth.service" "Bluetooth"
+    enable_service \
+        "NetworkManager.service" \
+        "NetworkManager"
+
+    enable_service \
+        "bluetooth.service" \
+        "Bluetooth"
 }
 
 # ============================================================
@@ -930,6 +1030,7 @@ verify_installation() {
     check_command_status niri "Niri"
     check_command_status quickshell "Quickshell"
     check_command_status kitty "Kitty"
+    check_command_status kate "Kate"
     check_command_status awww "awww"
     check_command_status mpv "mpv"
     check_command_status ffmpeg "ffmpeg"
@@ -938,16 +1039,30 @@ verify_installation() {
     check_command_status thunar "Thunar"
     check_command_status firefox "Firefox"
     check_command_status nvim "Neovim"
-    check_command_status "$BIN/wallfliper" "Wallfliper"
 
-    # Fastfetch is only checked as an app.
-    # Its configuration is intentionally never touched.
-    check_command_status fastfetch "Fastfetch"
+    # Fastfetch is only checked as an application.
+    # Its configuration is deliberately not touched.
+    if ! need_command fastfetch; then
+        if (( ! MINIMAL )); then
+            warn "Fastfetch missing"
+        fi
+    fi
 
-    # Absolutely no Waybar check here.
+    if need_command fastfetch; then
+        success "Fastfetch"
+    fi
+
+    # ========================================================
+    # Explicitly NEVER check/manage Waybar.
+    # ========================================================
+
     if [[ -d "$CONFIG/waybar" ]]; then
         info "existing Waybar config detected and left untouched"
     fi
+
+    # ========================================================
+    # Wallfliper
+    # ========================================================
 
     if [[ -f "$SHARE/wallfliper/main.py" ]]; then
         say "checking Wallfliper dependencies"
@@ -962,6 +1077,10 @@ verify_installation() {
             fi
         fi
     fi
+
+    # ========================================================
+    # PATH
+    # ========================================================
 
     if path_contains_bin; then
         success "~/.local/bin is in PATH"
@@ -984,14 +1103,16 @@ show_summary() {
 
     success "Niri desktop installed"
     success "Alice rice installed"
+    success "Kate installed and configured"
     success "Wallfliper installed"
     success "~/.local/bin configured"
 
     printf "\n"
 
-    printf "${CYAN}untouched:${RESET}\n"
+    printf "${CYAN}intentionally untouched:${RESET}\n"
     printf "  ${GRAY}•${RESET} ~/.config/fastfetch\n"
     printf "  ${GRAY}•${RESET} ~/.config/waybar\n"
+    printf "  ${GRAY}•${RESET} Kate session state\n"
 
     if [[ -d "$BACKUP" ]]; then
         printf "\n"
@@ -1002,7 +1123,7 @@ show_summary() {
     printf "${WHITE}${BOLD}next steps${RESET}\n\n"
     printf "  ${GRAY}•${RESET} log out and select ${PINK}Niri${RESET}\n"
     printf "  ${GRAY}•${RESET} or restart your Niri session\n"
-    printf "  ${GRAY}•${RESET} restart Quickshell if needed\n"
+    printf "  ${GRAY}•${RESET} restart Quickshell if necessary\n"
 
     printf "\n"
     printf "${DIM}have fun rice-ing :3${RESET}\n\n"
@@ -1080,9 +1201,9 @@ main() {
     else
         menu \
             "what would you like to install?" \
-            "full setup      — Niri + rice + apps + AUR + services" \
-            "minimal setup   — Niri + rice + required packages" \
-            "configs only    — dotfiles without package installation" \
+            "full setup      — Niri + rice + Kate + apps + AUR" \
+            "minimal setup   — Niri + rice + Kate + required packages" \
+            "configs only    — dotfiles without packages" \
             "packages only   — install dependencies/apps" \
             "exit"
 
@@ -1099,6 +1220,7 @@ main() {
         0)
             do_full_install
             ;;
+
         1)
             MINIMAL=1
 
@@ -1115,17 +1237,21 @@ main() {
             apply_dconf
             verify_installation
             ;;
+
         2)
             do_configs_only
             ;;
+
         3)
             do_packages_only
             ;;
+
         4)
             clear_screen
             info "bye :3"
             exit 0
             ;;
+
         *)
             fail "invalid menu selection"
             exit 1
