@@ -1,4 +1,4 @@
-```bash
+
 #!/usr/bin/env bash
 #
 # Alice's Niri dotfiles installer
@@ -1638,4 +1638,4 @@ main() {
 }
 
 main "$@"
-```
+
