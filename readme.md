@@ -1,4 +1,4 @@
-````markdown
+
 # alice's niri dots
 
 my personal Niri desktop rice for Arch Linux :3
@@ -686,4 +686,4 @@ https://raw.githubusercontent.com/AliceTheDotfile/niri-dots-clean/main/install.s
 have fun rice-ing :3
 
 ```
-```
+
