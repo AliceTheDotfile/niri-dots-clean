@@ -13,6 +13,7 @@ Normal sync:
     * never adopts random ~/.local/bin files
     * never adopts random wallpapers
     * never commits unrelated pre-existing repository changes
+      (including files that were already staged)
 
 Adopt-new mode:
     * discovers recently-created files inside already represented repo trees
@@ -20,7 +21,11 @@ Adopt-new mode:
 
 Remote handling:
     * fetches before push
-    * protects unrelated working-tree changes with a temporary stash
+    * only stashes unrelated working-tree changes when the branch actually
+      has to be fast-forwarded / rebased / reset
+    * restores the stash with `stash apply` and rolls back cleanly on a
+      conflict, so conflict markers are never left in your files
+    * refuses to commit/push while the index has unresolved merge conflicts
     * detects remote-ahead/diverged branches
     * reconciles old sync-only commits using managed-path diffs
     * safely removes accidental unrelated files from old sync commits
@@ -47,6 +52,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +67,8 @@ CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
 SHARE = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local" / "share"))
 BIN = HOME / ".local" / "bin"
 DOTFILES = Path(__file__).resolve().parent
+
+SYNC_COMMIT_MESSAGE = "sync: update rice from live system"
 
 
 # ============================================================
@@ -125,6 +133,10 @@ WALLPAPER_REPO = DOTFILES / "Wallpapers"
 
 LOCAL_BIN_SOURCE = BIN
 LOCAL_BIN_REPO = DOTFILES / "local" / "bin"
+
+# Populated by build_plan() / discover_new().
+TRACKED: set[str] = set()
+LATEST_COMMIT: float = 0.0
 
 
 # ============================================================
@@ -264,7 +276,7 @@ def git_status_paths() -> set[str]:
         if path:
             paths.add(path)
 
-        # Rename/copy entries have the new path as the next NUL item.
+        # Rename/copy entries have the original path as the next NUL item.
         status_code = entry[:2]
         if status_code[0] in {"R", "C"} or status_code[1] in {"R", "C"}:
             if i + 1 < len(parts) and parts[i + 1]:
@@ -274,6 +286,39 @@ def git_status_paths() -> set[str]:
         i += 1
 
     return paths
+
+
+def unmerged_paths() -> list[str]:
+    """Paths with unresolved merge conflicts in the index (UU, AA, ...)."""
+    result = git("ls-files", "--unmerged", "-z", check=False)
+    if result.returncode != 0:
+        return []
+
+    paths: set[str] = set()
+    for entry in result.stdout.split("\0"):
+        if not entry:
+            continue
+        # "<mode> <sha> <stage>\t<path>"
+        _, _, path = entry.partition("\t")
+        if path:
+            paths.add(path)
+
+    return sorted(paths)
+
+
+def unmerged_message(paths: list[str]) -> str:
+    listing = ", ".join(paths)
+    return (
+        f"unresolved merge conflicts in: {listing}\n"
+        "    fix the files (remove any <<<<<<< / ======= / >>>>>>> markers),\n"
+        "    run `git add <file>` for each one, then re-run sync"
+    )
+
+
+def ensure_no_unmerged() -> None:
+    paths = unmerged_paths()
+    if paths:
+        raise RuntimeError(unmerged_message(paths))
 
 
 def tracked_files() -> set[str]:
@@ -711,15 +756,16 @@ def dconf_change(live: str | None) -> Change | None:
     if existing == live:
         return None
 
-    temp = Path(os.path.join("/tmp", ".alice-dconf-sync.tmp"))
     # The Change source expects a real file. It is only used while applying,
-    # then removed by apply_dconf_change.
+    # then removed by apply_dconf_change (or on dry-run / skip).
     try:
-        temp.write_text(live, encoding="utf-8")
+        fd, temp_name = tempfile.mkstemp(prefix="alice-dconf-sync-", suffix=".ini")
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fp.write(live)
     except OSError as exc:
         raise RuntimeError(f"could not prepare dconf sync: {exc}") from exc
 
-    return Change("update", temp, destination)
+    return Change("update", Path(temp_name), destination)
 
 
 # ============================================================
@@ -879,30 +925,48 @@ def make_commit(changes: list[Change], dconf: Change | None) -> bool:
         info("this sync produced no repository changes to commit")
         return False
 
-    git(
-        "add",
-        "-A",
-        "--",
-        *paths,
-    )
+    ensure_no_unmerged()
 
-    staged = git(
-        "diff",
-        "--cached",
-        "--name-only",
-    ).stdout.strip()
+    git("add", "-A", "--", *paths)
 
-    if not staged:
+    # Only the paths this sync actually changed.
+    ours = [
+        p
+        for p in git(
+            "diff", "--cached", "--name-only", "-z", "--", *paths
+        ).stdout.split("\0")
+        if p
+    ]
+
+    if not ours:
         info("nothing from this sync is staged")
         return False
 
+    everything_staged = {
+        p
+        for p in git("diff", "--cached", "--name-only", "-z").stdout.split("\0")
+        if p
+    }
+    foreign = everything_staged - set(ours)
+    if foreign:
+        warn(
+            f"{len(foreign)} unrelated file(s) were already staged; "
+            "they will NOT be part of the sync commit:"
+        )
+        for path in sorted(foreign):
+            print(f"    {c(GRAY, path)}")
+
     print()
     say("creating sync commit")
-    git_live(
-        "commit",
-        "-m",
-        "sync: update rice from live system",
-    )
+    info(f"git commit --only ({len(ours)} synced file(s))")
+
+    # `--only -- <paths>` commits exactly those paths and leaves everything
+    # else that is staged untouched. A bare `git commit` would sweep in every
+    # staged file, which is how unrelated files leaked into old sync commits.
+    result = git("commit", "-m", SYNC_COMMIT_MESSAGE, "--only", "--", *ours)
+    if result.stdout.strip():
+        print(result.stdout.rstrip())
+
     success("git commit created")
     return True
 
@@ -927,6 +991,8 @@ def stash_worktree_for_git_operation() -> str | None:
     The stash includes untracked files. It does not include ignored files.
     Returns the stash object id when something was stashed.
     """
+    ensure_no_unmerged()
+
     if not git_status():
         return None
 
@@ -965,42 +1031,66 @@ def stash_worktree_for_git_operation() -> str | None:
     return stash_hash
 
 
+def find_stash_ref(stash_hash: str) -> str | None:
+    result = git("stash", "list", "--format=%gd %H", check=False)
+    for line in result.stdout.splitlines():
+        ref, _, value = line.partition(" ")
+        if value.strip() == stash_hash:
+            return ref
+    return None
+
+
+def rollback_failed_apply() -> None:
+    """
+    Undo a partially-applied (conflicted) stash.
+
+    This is only called when the worktree was completely clean before the
+    apply, so everything present now was put there by the failed apply. The
+    stash itself is kept, so nothing is lost.
+    """
+    git("reset", "--hard", "HEAD", check=False)
+    git("clean", "-fd", check=False)
+
+
 def restore_worktree_stash(stash_hash: str | None) -> None:
-    """Restore a temporary stash without deleting it if a conflict occurs."""
+    """
+    Restore the temporary stash.
+
+    Uses `stash apply` + `stash drop` instead of `stash pop`: a conflicted
+    pop writes <<<<<<< markers into your files and leaves them unmerged,
+    which then blocks every later stash/commit. On any failure the worktree
+    is rolled back to clean and the stash is kept.
+    """
     if not stash_hash:
         return
 
     print()
     info("restoring your pre-existing repository changes...")
 
-    current = git(
-        "stash",
-        "list",
-        "-1",
-        "--format=%H",
-        check=False,
-    )
-
-    if current.returncode != 0 or current.stdout.strip() != stash_hash:
-        warn("temporary stash is no longer the newest stash")
-        warn(f"your changes remain safely stored at stash {stash_hash}")
+    ref = find_stash_ref(stash_hash)
+    if ref is None:
+        warn("temporary stash could not be found in the stash list")
+        warn(f"if your changes are missing, look for commit {stash_hash}")
         return
 
-    result = git_live(
-        "stash",
-        "pop",
-        "--index",
-        "stash@{0}",
-        check=False,
-    )
-
-    if result.returncode != 0:
-        warn("your local changes could not be restored cleanly")
-        warn(f"the temporary stash was kept at {stash_hash}")
-        warn("resolve the restore conflict, then drop the stash manually")
+    if git_status():
+        warn("repository is not clean; not restoring automatically")
+        warn(f"your changes remain safely stored in {ref} ({stash_hash})")
         return
 
-    success("pre-existing repository changes restored")
+    for flags in (("--index",), ()):
+        result = git("stash", "apply", *flags, ref, check=False)
+        if result.returncode == 0:
+            git("stash", "drop", ref, check=False)
+            success("pre-existing repository changes restored")
+            return
+
+        rollback_failed_apply()
+
+    warn("your local changes could not be restored cleanly")
+    warn("the repository was left clean; nothing was lost")
+    warn(f"your changes are kept in {ref} ({stash_hash})")
+    warn("inspect with `git stash show -p`, restore with `git stash apply`")
 
 
 def managed_repo_paths() -> list[str]:
@@ -1069,8 +1159,7 @@ def rewrite_old_sync_history() -> bool:
     if not commits:
         return False
 
-    sync_prefix = "sync: update rice from live system"
-    if not all(subject.startswith(sync_prefix) for _, subject in commits):
+    if not all(subject.startswith(SYNC_COMMIT_MESSAGE) for _, subject in commits):
         return False
 
     merge_base = git(
@@ -1160,7 +1249,7 @@ def rewrite_old_sync_history() -> bool:
     git_live(
         "commit",
         "-m",
-        "sync: update rice from live system",
+        SYNC_COMMIT_MESSAGE,
     )
 
     success("old sync history rebuilt using managed files only")
@@ -1222,6 +1311,8 @@ def integrate_remote() -> None:
 
 
 def push_repo() -> None:
+    ensure_no_unmerged()
+
     upstream = upstream_ref()
 
     if upstream is None:
@@ -1234,47 +1325,53 @@ def push_repo() -> None:
             raise RuntimeError("repository has no configured git remote")
 
         remote = remotes[0].strip()
-        stash_hash = stash_worktree_for_git_operation()
-        try:
-            say(f"setting upstream: {remote}/{branch}")
-            result = git_live(
-                "push",
-                "-u",
-                remote,
-                branch,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise RuntimeError("git push failed")
-        finally:
-            restore_worktree_stash(stash_hash)
+
+        # Pushing a new upstream never touches the worktree, so there is no
+        # reason to stash anything here.
+        say(f"setting upstream: {remote}/{branch}")
+        result = git_live(
+            "push",
+            "-u",
+            remote,
+            branch,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("git push failed")
 
         success("repository pushed")
         return
 
-    stash_hash = stash_worktree_for_git_operation()
+    for attempt in range(2):
+        fetch_remote()
+        behind, _ahead = remote_counts()
 
-    try:
-        for attempt in range(2):
-            fetch_remote()
-            integrate_remote()
+        stash_hash: str | None = None
+        try:
+            # Only touch the worktree (stash) when the branch really has to
+            # be fast-forwarded, rebased or rebuilt.
+            if behind:
+                stash_hash = stash_worktree_for_git_operation()
+                integrate_remote()
 
             say("pushing to GitHub...")
             result = git_live("push", check=False)
-            if result.returncode == 0:
-                success("repository pushed")
-                return
+        finally:
+            restore_worktree_stash(stash_hash)
 
-            if attempt == 0:
-                warn("remote changed during push; fetching again")
-                time.sleep(1)
-                continue
+        if result.returncode == 0:
+            success("repository pushed")
+            return
 
-            raise RuntimeError(
-                "git push was rejected after the remote changed again"
-            )
-    finally:
-        restore_worktree_stash(stash_hash)
+        if attempt == 0:
+            warn("push was rejected; fetching again")
+            time.sleep(1)
+            continue
+
+        raise RuntimeError(
+            "git push was rejected after retrying "
+            "(remote changed again, or authentication failed)"
+        )
 
 
 # ============================================================
@@ -1291,6 +1388,10 @@ def sync_project_from_remote() -> None:
     )
     print(c(GRAY, str(DOTFILES)))
     print()
+
+    unmerged = unmerged_paths()
+    if unmerged:
+        raise RuntimeError(unmerged_message(unmerged))
 
     status = git_status()
     if status:
@@ -1334,8 +1435,9 @@ def sync_project_from_remote() -> None:
     info("rebasing local commits onto the remote branch...")
     result = git_live("rebase", "@{u}", check=False)
     if result.returncode != 0:
-        warn("rebase stopped because Git reported a conflict")
-        raise RuntimeError("git rebase failed; resolve conflicts and rerun")
+        git_live("rebase", "--abort", check=False)
+        warn("rebase stopped because Git reported a conflict; it was aborted")
+        raise RuntimeError("git rebase failed; resolve the divergence manually")
 
     success("project folder reconciled with remote repo :3")
 
@@ -1368,6 +1470,15 @@ def run_sync(
 
     print()
 
+    # Unresolved conflicts make commit/stash/push fail halfway through, so
+    # stop before touching anything if we are going to need them.
+    unmerged = unmerged_paths()
+    if unmerged:
+        if (commit or push) and not dry:
+            raise RuntimeError(unmerged_message(unmerged))
+        warn("unresolved merge conflicts in: " + ", ".join(unmerged))
+        warn("resolve them and `git add` before using --commit / --push")
+
     # Snapshot repository state before doing anything. These are NOT ours.
     initial_dirty = git_status_paths()
     if initial_dirty:
@@ -1388,7 +1499,8 @@ def run_sync(
         rel = repo_relative(dconf.destination)
         if rel in initial_dirty:
             warn(f"skipping {rel}: repository file already had local changes")
-            dconf.source.unlink(missing_ok=True)
+            if dconf.source is not None:
+                dconf.source.unlink(missing_ok=True)
             dconf = None
         else:
             print()
@@ -1396,7 +1508,7 @@ def run_sync(
             print(f"         {c(GRAY, 'TO:  ')} {dconf.destination}")
 
     if dry:
-        if dconf is not None:
+        if dconf is not None and dconf.source is not None:
             dconf.source.unlink(missing_ok=True)
         print()
         success(f"dry-run finished: {len(changes)} file change(s)")
@@ -1441,6 +1553,11 @@ def show_status() -> None:
         print(status)
     else:
         success("repository is clean")
+
+    unmerged = unmerged_paths()
+    if unmerged:
+        print()
+        warn(unmerged_message(unmerged))
 
     upstream = upstream_ref()
     if upstream:
@@ -1553,7 +1670,7 @@ def validate_repo() -> None:
         raise RuntimeError("do not run this script as root")
     if shutil.which("git") is None:
         raise RuntimeError("git is required")
-    if not (DOTFILES / ".git").is_dir():
+    if not (DOTFILES / ".git").exists():
         raise RuntimeError("sync.py must be inside your dotfiles git repository")
 
 
