@@ -1,63 +1,43 @@
 #!/usr/bin/env python3
-
 """
-Alice's Niri dotfiles reverse synchronizer :3
+Alice's Niri reverse rice sync :3
 
-Copies the LIVE rice back into the dotfiles repository.
+LIVE SYSTEM -> DOTFILES REPOSITORY
 
 Normal sync:
-    - updates files already tracked by Git
-    - adds nothing unrelated
-    - does not scan Waybar/Fastfetch
-    - does not adopt random ~/.local/bin files
-    - does not adopt random wallpapers
-    - NEVER syncs ~/.bashrc
-    - NEVER syncs ~/.config/niri/parts/output.kdl
-    - NEVER syncs ~/.icons/Bibata-Material-Cloud
+    * updates only managed/tracked files
+    * never touches Waybar or Fastfetch config
+    * never syncs ~/.bashrc
+    * never syncs ~/.config/niri/parts/output.kdl
+    * never syncs ~/.icons/Bibata-Material-Cloud
+    * never adopts random ~/.local/bin files
+    * never adopts random wallpapers
+    * never commits unrelated pre-existing repository changes
 
 Adopt-new mode:
-    - also finds recently-created files inside managed rice trees
-    - only considers files inside directories already represented
-      in the Git repository
-    - NEVER adopts ~/.config/niri/parts/output.kdl
+    * discovers recently-created files inside already represented repo trees
+    * still excludes machine-specific / ignored files
+
+Remote handling:
+    * fetches before push
+    * protects unrelated working-tree changes with a temporary stash
+    * detects remote-ahead/diverged branches
+    * reconciles old sync-only commits using managed-path diffs
+    * safely removes accidental unrelated files from old sync commits
+    * rebases normal local commits when appropriate
+    * retries once when the remote changes during a push
+    * never force-pushes
 
 Usage:
     ./sync.py
-        Interactive menu.
-
     ./sync.py --dry-run
-        Show tracked files that would change.
-
     ./sync.py --discover
-        Find possible new rice files.
-
     ./sync.py --adopt-new
-        Sync tracked changes and adopt recent new rice files.
-
     ./sync.py --prune
-        Remove tracked repository files that are missing live.
-
     ./sync.py --commit
-        Sync and create a Git commit.
-
     ./sync.py --push
-        Sync, commit, and push.
-
+    ./sync.py --remote-sync
     ./sync.py --help
-        Show help.
-
-Never managed:
-    ~/.bashrc
-    ~/.config/waybar
-    ~/.config/fastfetch
-    ~/.config/niri/parts/output.kdl
-    ~/.local/share/kate/anonymous.katesession
-    ~/.icons/Bibata-Material-Cloud
-    .qmlls.ini
-    *.bak
-    *.pyc
-    *.log
-    __pycache__/
 """
 
 from __future__ import annotations
@@ -67,6 +47,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,7 +70,6 @@ DOTFILES = Path(__file__).resolve().parent
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
-
 PINK = "\033[38;5;205m"
 PURPLE = "\033[38;5;141m"
 CYAN = "\033[38;5;81m"
@@ -119,7 +99,6 @@ CONFIG_DIRS = (
     "swaync",
 )
 
-# ~/.bashrc intentionally NOT included.
 HOME_FILES = (
     ".bash_profile",
     ".config/kdeglobals",
@@ -129,7 +108,6 @@ HOME_FILES = (
     ".local/share/color-schemes/AliceNight.colors",
 )
 
-# Bibata-Material-Cloud intentionally NOT included.
 HOME_DIRS = (
     ".config/kate",
     ".local/share/themes/AliceNight",
@@ -140,7 +118,6 @@ QUICKSHELL_REPO = DOTFILES / "quickshell" / "my-shell"
 
 WALLFLIPER_SOURCE = SHARE / "wallfliper"
 WALLFLIPER_REPO = DOTFILES / "wallfliper"
-
 WALLFLIPER_CONFIG = CONFIG / "wallfliper" / "config.json"
 
 WALLPAPER_SOURCE = HOME / "Wallpapers"
@@ -168,85 +145,71 @@ IGNORE_SUFFIXES = {
     ".log",
 }
 
-IGNORE_DIRS = {
-    ".git",
-    "__pycache__",
-}
-
-
-def ignored(path: Path) -> bool:
-    return (
-        path.name in IGNORE_NAMES
-        or path.suffix in IGNORE_SUFFIXES
-        or ".git" in path.parts
-        or "__pycache__" in path.parts
-    )
-
 
 def is_niri_output(path: Path) -> bool:
-    """
-    ~/.config/niri/parts/output.kdl is machine-specific.
-
-    It must never be copied into the repository,
-    discovered as a new file, updated, or pruned.
-    """
+    """The machine-specific Niri output file is always unmanaged."""
     try:
-        return (
-            path.relative_to(CONFIG / "niri")
-            == Path("parts/output.kdl")
-        )
-    except ValueError:
+        return path.resolve(strict=False) == (
+            CONFIG / "niri" / "parts" / "output.kdl"
+        ).resolve(strict=False)
+    except OSError:
         return False
 
 
-def ignored_for_sync(path: Path) -> bool:
-    return (
-        ignored(path)
-        or is_niri_output(path)
-    )
+def ignored(path: Path) -> bool:
+    if path.name in IGNORE_NAMES:
+        return True
+    if path.suffix in IGNORE_SUFFIXES:
+        return True
+    if ".git" in path.parts:
+        return True
+    if "__pycache__" in path.parts:
+        return True
+    if is_niri_output(path):
+        return True
+    return False
 
 
 # ============================================================
 # Output
 # ============================================================
 
+COLOR = sys.stdout.isatty()
+
+
+def c(color: str, text: str) -> str:
+    return f"{color}{text}{RESET}" if COLOR else text
+
+
 def clear_screen() -> None:
-    if sys.stdout.isatty():
+    if COLOR:
         print("\033[2J\033[H", end="")
 
 
 def say(message: str) -> None:
-    print(f"{PINK}::{RESET} {message}", flush=True)
+    print(f"{c(PINK, '::')} {message}", flush=True)
 
 
 def info(message: str) -> None:
-    print(f"{CYAN}→{RESET} {message}", flush=True)
+    print(f"{c(CYAN, '→')} {message}", flush=True)
 
 
 def success(message: str) -> None:
-    print(f"{GREEN}✓{RESET} {message}", flush=True)
+    print(f"{c(GREEN, '✓')} {message}", flush=True)
 
 
 def warn(message: str) -> None:
-    print(f"{YELLOW}!{RESET} {message}", flush=True)
+    print(f"{c(YELLOW, '!')} {message}", flush=True)
 
 
 def error(message: str) -> None:
-    print(
-        f"{RED}✗{RESET} {message}",
-        file=sys.stderr,
-        flush=True,
-    )
+    print(f"{c(RED, '✗')} {message}", file=sys.stderr, flush=True)
 
 
 def pause() -> None:
     try:
-        input(
-            f"\n{GRAY}"
-            "press enter to continue..."
-            f"{RESET}"
-        )
-    except EOFError:
+        input(f"\n{c(GRAY, 'press enter to continue...')}")
+    except (EOFError, KeyboardInterrupt):
         pass
 
 
@@ -254,53 +217,114 @@ def pause() -> None:
 # Git helpers
 # ============================================================
 
-def git(
-    *args: str,
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            "git",
-            "-C",
-            str(DOTFILES),
-            *args,
-        ],
+
+def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", "-C", str(DOTFILES), *args],
         text=True,
         capture_output=True,
-        check=check,
+        check=False,
     )
+    if check and result.returncode != 0:
+        message = (result.stderr or result.stdout).strip()
+        raise RuntimeError(message or f"git {' '.join(args)} failed")
+    return result
+
+
+def git_live(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    command = ["git", "-C", str(DOTFILES), *args]
+    info("git " + " ".join(args))
+    result = subprocess.run(command, text=True, check=False)
+    if check and result.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed with exit code {result.returncode}"
+        )
+    return result
 
 
 def git_status() -> str:
-    return git(
-        "status",
-        "--short",
-    ).stdout.strip()
+    return git("status", "--short").stdout.strip()
+
+
+def git_status_paths() -> set[str]:
+    result = git("status", "--porcelain=v1", "-z")
+    raw = result.stdout
+    paths: set[str] = set()
+    parts = raw.split("\0")
+
+    i = 0
+    while i < len(parts):
+        entry = parts[i]
+        if not entry:
+            i += 1
+            continue
+
+        # Normal v1 entry: XY<space>path
+        path = entry[3:] if len(entry) >= 4 else ""
+        if path:
+            paths.add(path)
+
+        # Rename/copy entries have the new path as the next NUL item.
+        status_code = entry[:2]
+        if status_code[0] in {"R", "C"} or status_code[1] in {"R", "C"}:
+            if i + 1 < len(parts) and parts[i + 1]:
+                paths.add(parts[i + 1])
+            i += 1
+
+        i += 1
+
+    return paths
 
 
 def tracked_files() -> set[str]:
-    return {
-        value
-        for value in git(
-            "ls-files",
-            "-z",
-        ).stdout.split("\0")
-        if value
-    }
+    result = git("ls-files", "-z")
+    return {item for item in result.stdout.split("\0") if item}
+
+
+def current_branch() -> str:
+    return git("branch", "--show-current").stdout.strip()
+
+
+def upstream_ref() -> str | None:
+    result = git(
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{u}",
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def remote_counts() -> tuple[int, int]:
+    """Return (behind, ahead) relative to the configured upstream."""
+    result = git(
+        "rev-list",
+        "--left-right",
+        "--count",
+        "HEAD...@{u}",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("could not determine local/remote divergence")
+
+    fields = result.stdout.strip().split()
+    if len(fields) != 2:
+        raise RuntimeError("could not parse local/remote divergence")
+
+    # left = local-only (ahead), right = remote-only (behind)
+    ahead = int(fields[0])
+    behind = int(fields[1])
+    return behind, ahead
 
 
 def latest_commit_time() -> float:
-    result = git(
-        "log",
-        "-1",
-        "--format=%ct",
-        check=False,
-    )
-
+    result = git("log", "-1", "--format=%ct", check=False)
     try:
-        return float(
-            result.stdout.strip()
-        )
+        return float(result.stdout.strip())
     except ValueError:
         return 0.0
 
@@ -308,6 +332,7 @@ def latest_commit_time() -> float:
 # ============================================================
 # Filesystem helpers
 # ============================================================
+
 
 def exists(path: Path) -> bool:
     return path.exists() or path.is_symlink()
@@ -322,117 +347,63 @@ def iter_files(root: Path):
         return
 
     if is_file_like(root):
-        if not ignored_for_sync(root):
+        if not ignored(root):
             yield root
         return
 
     try:
         for path in root.rglob("*"):
-            if ignored_for_sync(path):
+            if ignored(path):
                 continue
-
             if is_file_like(path):
                 yield path
-
     except OSError as exc:
-        warn(
-            f"could not scan {root}: {exc}"
-        )
+        warn(f"could not scan {root}: {exc}")
 
 
 def is_text_file(path: Path) -> bool:
     if not path.is_file():
         return False
-
     try:
         data = path.read_bytes()[:65536]
-
         if b"\x00" in data:
             return False
-
         data.decode("utf-8")
         return True
-
-    except (
-        OSError,
-        UnicodeDecodeError,
-    ):
+    except (OSError, UnicodeDecodeError):
         return False
 
 
-def normalized_text(
-    path: Path,
-) -> str | None:
+def normalized_text(path: Path) -> str | None:
     if not is_text_file(path):
         return None
-
     try:
-        text = path.read_text(
-            encoding="utf-8"
-        )
-    except (
-        OSError,
-        UnicodeDecodeError,
-    ):
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return None
-
-    return text.replace(
-        str(HOME),
-        "@HOME@",
-    )
+    return text.replace(str(HOME), "@HOME@")
 
 
-def same_file(
-    source: Path,
-    destination: Path,
-) -> bool:
-    if not exists(source):
+def same_file(source: Path, destination: Path) -> bool:
+    if not exists(source) or not exists(destination):
         return False
 
-    if not exists(destination):
-        return False
-
-    if (
-        source.is_symlink()
-        or destination.is_symlink()
-    ):
-        if (
-            not source.is_symlink()
-            or not destination.is_symlink()
-        ):
+    if source.is_symlink() or destination.is_symlink():
+        if not source.is_symlink() or not destination.is_symlink():
             return False
-
         try:
-            return (
-                source.readlink()
-                == destination.readlink()
-            )
+            return source.readlink() == destination.readlink()
         except OSError:
             return False
 
-    source_text = normalized_text(
-        source
-    )
+    source_text = normalized_text(source)
+    destination_text = normalized_text(destination)
 
-    destination_text = normalized_text(
-        destination
-    )
-
-    if (
-        source_text is not None
-        and destination_text is not None
-    ):
-        return (
-            source_text
-            == destination_text
-        )
+    if source_text is not None and destination_text is not None:
+        return source_text == destination_text
 
     try:
-        return filecmp.cmp(
-            source,
-            destination,
-            shallow=False,
-        )
+        return filecmp.cmp(source, destination, shallow=False)
     except OSError:
         return False
 
@@ -441,7 +412,8 @@ def same_file(
 # Change object
 # ============================================================
 
-@dataclass
+
+@dataclass(frozen=True)
 class Change:
     action: str
     source: Path | None
@@ -452,112 +424,49 @@ class Change:
 # Repository helpers
 # ============================================================
 
-def repo_relative(
-    path: Path,
-) -> str | None:
+
+def repo_relative(path: Path) -> str | None:
     try:
-        return str(
-            path.relative_to(
-                DOTFILES
-            )
-        )
+        return path.relative_to(DOTFILES).as_posix()
     except ValueError:
         return None
 
 
-def is_tracked(
-    path: Path,
-) -> bool:
+def is_tracked(path: Path) -> bool:
     relative = repo_relative(path)
-
-    if relative is None:
-        return False
-
-    # output.kdl is deliberately unmanaged even if
-    # an old copy happens to exist in the repository.
-    if relative == "niri/parts/output.kdl":
-        return False
-
-    return relative in TRACKED
+    return relative is not None and relative in TRACKED
 
 
-def parent_tracked(
-    path: Path,
-) -> bool:
+def parent_tracked(path: Path) -> bool:
     relative = repo_relative(path)
-
-    if relative is None:
+    if relative is None or relative == "niri/parts/output.kdl":
         return False
 
-    # Never allow discovery/adoption of machine-local output.kdl.
-    if relative == "niri/parts/output.kdl":
-        return False
+    parent = Path(relative).parent.as_posix()
+    prefix = "" if parent == "." else parent + "/"
 
-    parent = (
-        str(Path(relative).parent)
-        + "/"
-    )
-
-    return any(
-        item.startswith(parent)
-        for item in TRACKED
-    )
+    return any(item.startswith(prefix) for item in TRACKED)
 
 
-def recent(
-    path: Path,
-) -> bool:
+def recent(path: Path) -> bool:
     try:
-        return (
-            path.stat().st_mtime
-            >= LATEST_COMMIT
-        )
+        return path.stat().st_mtime >= LATEST_COMMIT
     except OSError:
         return False
 
 
-def normalize_repo(
-    path: Path,
-) -> None:
-    if (
-        not path.is_file()
-        or ignored_for_sync(path)
-        or not is_text_file(path)
-    ):
-        return
-
-    # Extra safety: output.kdl should never be normalized
-    # because it should never enter the repository.
-    if is_niri_output(
-        CONFIG / "niri" / path.name
-    ):
-        return
-
-    try:
-        text = path.read_text(
-            encoding="utf-8"
-        )
-    except (
-        OSError,
-        UnicodeDecodeError,
-    ):
-        return
-
-    home = str(HOME)
-
-    if home in text:
-        path.write_text(
-            text.replace(
-                home,
-                "@HOME@",
-            ),
-            encoding="utf-8",
-        )
+def should_skip_destination(path: Path) -> bool:
+    relative = repo_relative(path)
+    return (
+        relative == "niri/parts/output.kdl"
+        or ignored(path)
+    )
 
 
 # ============================================================
-# Directory comparison
+# Comparison
 # ============================================================
+
 
 def compare_directory(
     source: Path,
@@ -565,11 +474,12 @@ def compare_directory(
     *,
     prune: bool = False,
     adopt_new: bool = False,
+    tracked_only: bool = False,
 ) -> list[Change]:
-
     changes: list[Change] = []
 
-    source_files = {}
+    source_files: dict[Path, Path] = {}
+    destination_files: dict[Path, Path] = {}
 
     if exists(source):
         source_files = {
@@ -577,110 +487,44 @@ def compare_directory(
             for path in iter_files(source)
         }
 
-    destination_files = {}
-
     if exists(destination):
         destination_files = {
             path.relative_to(destination): path
             for path in iter_files(destination)
         }
 
-    for relative, source_path in sorted(
-        source_files.items()
-    ):
-        destination_path = (
-            destination / relative
-        )
+    for relative, source_path in sorted(source_files.items()):
+        destination_path = destination / relative
 
-        # ====================================================
-        # Machine-local Niri output configuration.
-        #
-        # This is intentionally skipped in every mode:
-        #   - normal sync
-        #   - adopt-new
-        #   - discover
-        #   - prune
-        # ====================================================
-
-        if (
-            source == CONFIG / "niri"
-            and relative
-            == Path("parts/output.kdl")
-        ):
+        if should_skip_destination(destination_path):
             continue
 
-        if (
-            destination == DOTFILES / "niri"
-            and relative
-            == Path("parts/output.kdl")
-        ):
+        if tracked_only and not is_tracked(destination_path):
             continue
 
         if exists(destination_path):
-            if not same_file(
-                source_path,
-                destination_path,
-            ):
-                changes.append(
-                    Change(
-                        "update",
-                        source_path,
-                        destination_path,
-                    )
-                )
-
+            if not same_file(source_path, destination_path):
+                changes.append(Change("update", source_path, destination_path))
             continue
 
-        if (
-            adopt_new
-            and parent_tracked(
-                destination_path
-            )
-            and recent(source_path)
-        ):
-            changes.append(
-                Change(
-                    "add",
-                    source_path,
-                    destination_path,
-                )
-            )
+        if adopt_new and parent_tracked(destination_path) and recent(source_path):
+            changes.append(Change("add", source_path, destination_path))
 
-    if prune:
-        for relative, destination_path in sorted(
-            destination_files.items()
-        ):
+    if prune and exists(destination):
+        for relative, destination_path in sorted(destination_files.items()):
             source_path = source / relative
 
-            # Never prune Niri's machine-specific output.kdl.
-            if (
-                destination
-                == DOTFILES / "niri"
-                and relative
-                == Path("parts/output.kdl")
-            ):
+            if should_skip_destination(destination_path):
                 continue
 
-            if (
-                not exists(source_path)
-                and is_tracked(
-                    destination_path
-                )
-            ):
-                changes.append(
-                    Change(
-                        "delete",
-                        None,
-                        destination_path,
-                    )
-                )
+            if tracked_only and not is_tracked(destination_path):
+                continue
+
+            if not exists(source_path) and is_tracked(destination_path):
+                changes.append(Change("delete", None, destination_path))
 
     return changes
 
-
-# ============================================================
-# Explicit file comparison
-# ============================================================
 
 def compare_file(
     source: Path,
@@ -688,175 +532,40 @@ def compare_file(
     *,
     prune: bool = False,
 ) -> list[Change]:
-
-    # Extra protection for the Niri output file.
-    if is_niri_output(source):
-        return []
-
-    if (
-        repo_relative(destination)
-        == "niri/parts/output.kdl"
-    ):
+    if should_skip_destination(destination):
         return []
 
     if exists(source):
-
         if not exists(destination):
             if is_tracked(destination):
-                return [
-                    Change(
-                        "add",
-                        source,
-                        destination,
-                    )
-                ]
-
+                return [Change("add", source, destination)]
             return []
 
-        if not same_file(
-            source,
-            destination,
-        ):
-            return [
-                Change(
-                    "update",
-                    source,
-                    destination,
-                )
-            ]
+        if not same_file(source, destination):
+            return [Change("update", source, destination)]
 
         return []
 
-    if (
-        prune
-        and exists(destination)
-        and is_tracked(destination)
-    ):
-        return [
-            Change(
-                "delete",
-                None,
-                destination,
-            )
-        ]
+    if prune and exists(destination) and is_tracked(destination):
+        return [Change("delete", None, destination)]
 
     return []
 
 
 # ============================================================
-# Tracked-only special directories
+# Plan
 # ============================================================
 
-def compare_tracked_directory(
-    source: Path,
-    destination: Path,
-    *,
-    prune: bool = False,
-) -> list[Change]:
 
-    changes: list[Change] = []
-
-    if exists(source):
-        for source_path in iter_files(
-            source
-        ):
-            relative = (
-                source_path.relative_to(
-                    source
-                )
-            )
-
-            destination_path = (
-                destination / relative
-            )
-
-            if not is_tracked(
-                destination_path
-            ):
-                continue
-
-            if not exists(
-                destination_path
-            ):
-                changes.append(
-                    Change(
-                        "add",
-                        source_path,
-                        destination_path,
-                    )
-                )
-
-            elif not same_file(
-                source_path,
-                destination_path,
-            ):
-                changes.append(
-                    Change(
-                        "update",
-                        source_path,
-                        destination_path,
-                    )
-                )
-
-    if (
-        prune
-        and exists(destination)
-    ):
-        for destination_path in iter_files(
-            destination
-        ):
-            relative = (
-                destination_path.relative_to(
-                    destination
-                )
-            )
-
-            source_path = (
-                source / relative
-            )
-
-            if (
-                not exists(source_path)
-                and is_tracked(
-                    destination_path
-                )
-            ):
-                changes.append(
-                    Change(
-                        "delete",
-                        None,
-                        destination_path,
-                    )
-                )
-
-    return changes
-
-
-# ============================================================
-# Build plan
-# ============================================================
-
-def build_plan(
-    *,
-    prune: bool = False,
-    adopt_new: bool = False,
-) -> list[Change]:
-
-    global TRACKED
-    global LATEST_COMMIT
-
+def build_plan(*, prune: bool = False, adopt_new: bool = False) -> list[Change]:
+    global TRACKED, LATEST_COMMIT
     TRACKED = tracked_files()
-    LATEST_COMMIT = (
-        latest_commit_time()
-    )
+    LATEST_COMMIT = latest_commit_time()
 
     say("scanning managed files...")
 
     changes: list[Change] = []
 
-    #
-    # ~/.config
-    #
     for name in CONFIG_DIRS:
         changes.extend(
             compare_directory(
@@ -867,9 +576,6 @@ def build_plan(
             )
         )
 
-    #
-    # Quickshell
-    #
     changes.extend(
         compare_directory(
             QUICKSHELL_SOURCE,
@@ -879,12 +585,6 @@ def build_plan(
         )
     )
 
-    #
-    # Explicit home files.
-    #
-    # NOTE:
-    # ~/.bashrc is intentionally NOT here.
-    #
     for item in HOME_FILES:
         changes.extend(
             compare_file(
@@ -894,11 +594,6 @@ def build_plan(
             )
         )
 
-    #
-    # Explicit home directories.
-    #
-    # Bibata-Material-Cloud intentionally NOT here.
-    #
     for item in HOME_DIRS:
         changes.extend(
             compare_directory(
@@ -909,119 +604,69 @@ def build_plan(
             )
         )
 
-    #
-    # Wallfliper source.
-    #
     wall_changes = compare_directory(
         WALLFLIPER_SOURCE,
         WALLFLIPER_REPO,
         prune=prune,
         adopt_new=adopt_new,
     )
-
-    #
-    # config.json is managed separately.
-    #
-    wall_changes = [
+    changes.extend(
         change
         for change in wall_changes
-        if change.destination.name
-        != "config.json"
-    ]
-
-    changes.extend(
-        wall_changes
+        if change.destination.name != "config.json"
     )
 
-    #
-    # Wallfliper config.
-    #
     changes.extend(
         compare_file(
             WALLFLIPER_CONFIG,
-            WALLFLIPER_REPO
-            / "config.json",
+            WALLFLIPER_REPO / "config.json",
             prune=prune,
         )
     )
 
-    #
-    # ~/.local/bin:
-    # tracked files only.
-    #
     changes.extend(
-        compare_tracked_directory(
+        compare_directory(
             LOCAL_BIN_SOURCE,
             LOCAL_BIN_REPO,
             prune=prune,
+            tracked_only=True,
         )
     )
 
-    #
-    # Wallpapers:
-    # tracked files only.
-    #
     changes.extend(
-        compare_tracked_directory(
+        compare_directory(
             WALLPAPER_SOURCE,
             WALLPAPER_REPO,
             prune=prune,
+            tracked_only=True,
         )
     )
 
-    return sorted(
-        changes,
-        key=lambda change:
-            str(change.destination),
-    )
+    return sorted(changes, key=lambda change: str(change.destination))
 
 
 # ============================================================
-# Discover new files
+# Discovery
 # ============================================================
+
 
 def discover_new() -> list[Change]:
-
-    global TRACKED
-    global LATEST_COMMIT
-
+    global TRACKED, LATEST_COMMIT
     TRACKED = tracked_files()
-    LATEST_COMMIT = (
-        latest_commit_time()
-    )
+    LATEST_COMMIT = latest_commit_time()
 
-    say(
-        "looking for new rice files..."
+    say("looking for new rice files...")
+
+    roots = (
+        (CONFIG / "niri", DOTFILES / "niri"),
+        (QUICKSHELL_SOURCE, QUICKSHELL_REPO),
+        (CONFIG / "swaync", DOTFILES / "swaync"),
+        (CONFIG / "alice-rice", DOTFILES / "alice-rice"),
+        (CONFIG / "gamearch", DOTFILES / "gamearch"),
+        (CONFIG / "kate", DOTFILES / "home" / ".config" / "kate"),
     )
 
     candidates: list[Change] = []
-
-    #
-    # Only actual rice/config directories.
-    #
-    roots = (
-        (
-            CONFIG / "niri",
-            DOTFILES / "niri",
-        ),
-        (
-            QUICKSHELL_SOURCE,
-            QUICKSHELL_REPO,
-        ),
-        (
-            CONFIG / "swaync",
-            DOTFILES / "swaync",
-        ),
-        (
-            CONFIG / "alice-rice",
-            DOTFILES / "alice-rice",
-        ),
-        (
-            CONFIG / "gamearch",
-            DOTFILES / "gamearch",
-        ),
-    )
-
     for source, destination in roots:
         candidates.extend(
             compare_directory(
@@ -1038,449 +683,667 @@ def discover_new() -> list[Change]:
 # dconf
 # ============================================================
 
+
 def dconf_live() -> str | None:
     if shutil.which("dconf") is None:
         return None
-
-    if not os.environ.get(
-        "DBUS_SESSION_BUS_ADDRESS"
-    ):
+    if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
         return None
 
     result = subprocess.run(
-        [
-            "dconf",
-            "dump",
-            "/org/gnome/desktop/interface/",
-        ],
+        ["dconf", "dump", "/org/gnome/desktop/interface/"],
         text=True,
         capture_output=True,
         check=False,
     )
-
     if result.returncode != 0:
         return None
-
     return result.stdout
 
 
-def sync_dconf(
-    live: str | None,
-    *,
-    dry: bool,
-) -> None:
-
+def dconf_change(live: str | None) -> Change | None:
     if live is None:
-        return
+        return None
 
-    destination = (
-        DOTFILES
-        / "dconf"
-        / "interface.ini"
-    )
+    destination = DOTFILES / "dconf" / "interface.ini"
+    existing = destination.read_text(encoding="utf-8") if destination.exists() else ""
 
-    repo = (
-        destination.read_text(
-            encoding="utf-8"
-        )
-        if destination.exists()
-        else ""
-    )
+    if existing == live:
+        return None
 
-    if repo == live:
-        return
+    temp = Path(os.path.join("/tmp", ".alice-dconf-sync.tmp"))
+    # The Change source expects a real file. It is only used while applying,
+    # then removed by apply_dconf_change.
+    try:
+        temp.write_text(live, encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"could not prepare dconf sync: {exc}") from exc
 
-    print()
-    print(
-        f"    {YELLOW}[UPD]{RESET} "
-        "dconf:/org/gnome/desktop/interface/"
-    )
-    print(
-        f"         {GRAY}FROM:{RESET} "
-        "dconf:/org/gnome/desktop/interface/"
-    )
-    print(
-        f"         {GRAY}TO:  {RESET} "
-        f"{destination}"
-    )
-
-    if not dry:
-        destination.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        destination.write_text(
-            live,
-            encoding="utf-8",
-        )
+    return Change("update", temp, destination)
 
 
 # ============================================================
-# Display changes
+# Display
 # ============================================================
 
-def section_for(
-    change: Change,
-) -> str:
 
+def section_for(change: Change) -> str:
     source = change.source
-
     if source is None:
         return "repo"
 
     text = str(source)
-
-    if text.startswith(
-        str(CONFIG) + "/"
-    ):
+    if text.startswith(str(CONFIG) + os.sep):
         return "~/.config"
-
-    if text.startswith(
-        str(BIN) + "/"
-    ):
+    if text.startswith(str(BIN) + os.sep):
         return "~/.local/bin"
-
-    if text.startswith(
-        str(WALLPAPER_SOURCE) + "/"
-    ):
+    if text.startswith(str(WALLPAPER_SOURCE) + os.sep):
         return "~/Wallpapers"
-
-    if text.startswith(
-        str(WALLFLIPER_SOURCE) + "/"
-    ):
+    if text.startswith(str(WALLFLIPER_SOURCE) + os.sep):
         return "~/.local/share/wallfliper"
-
     return "~"
 
 
-def print_change(
-    change: Change,
-) -> None:
-
+def print_change(change: Change) -> None:
     if change.action == "add":
-        label = "ADD"
-        color = GREEN
-
+        label, color = "ADD", GREEN
     elif change.action == "update":
-        label = "UPD"
-        color = YELLOW
-
+        label, color = "UPD", YELLOW
     else:
-        label = "DEL"
-        color = RED
+        label, color = "DEL", RED
 
-    print(
-        f"    {color}"
-        f"[{label}]"
-        f"{RESET}"
-    )
-
+    print(f"    {c(color, '[' + label + ']')}")
     if change.source is not None:
-        print(
-            f"         "
-            f"{GRAY}FROM:{RESET} "
-            f"{change.source}"
-        )
-
-    print(
-        f"         "
-        f"{GRAY}TO:  {RESET} "
-        f"{change.destination}"
-    )
+        print(f"         {c(GRAY, 'FROM:')} {change.source}")
+    print(f"         {c(GRAY, 'TO:  ')} {change.destination}")
 
 
-def print_changes(
-    changes: list[Change],
-) -> None:
-
+def print_changes(changes: list[Change]) -> None:
     if not changes:
         print()
-        success(
-            "no changes detected"
-        )
+        success("no changes detected")
         return
 
     current = None
-
     for change in changes:
-        section = section_for(
-            change
-        )
-
+        section = section_for(change)
         if section != current:
             print()
-            say(
-                f"syncing {section}"
-            )
+            say(f"syncing {section}")
             current = section
+        print_change(change)
 
-        print_change(
-            change
-        )
+
+# ============================================================
+# Safety around pre-existing repo changes
+# ============================================================
+
+
+def filter_conflicts(
+    changes: list[Change],
+    initial_dirty: set[str],
+) -> list[Change]:
+    if not initial_dirty:
+        return changes
+
+    allowed: list[Change] = []
+    for change in changes:
+        relative = repo_relative(change.destination)
+        if relative in initial_dirty:
+            warn(
+                f"skipping {relative}: repository file already had local changes"
+            )
+            continue
+        allowed.append(change)
+
+    return allowed
 
 
 # ============================================================
 # Apply
 # ============================================================
 
-def apply_change(
-    change: Change,
-) -> None:
 
-    # Absolute last line of defense:
-    # output.kdl must never be written by this synchronizer.
-    if (
-        repo_relative(change.destination)
-        == "niri/parts/output.kdl"
-    ):
+def apply_change(change: Change) -> None:
+    destination = change.destination
+
+    if should_skip_destination(destination):
         return
-
-    destination = (
-        change.destination
-    )
 
     if change.action == "delete":
-        if (
-            destination.is_dir()
-            and not destination.is_symlink()
-        ):
-            shutil.rmtree(
-                destination
-            )
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
         else:
-            destination.unlink(
-                missing_ok=True
-            )
-
+            destination.unlink(missing_ok=True)
         return
 
-    source = change.source
-
-    if source is None:
+    if change.source is None:
         return
 
-    destination.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
     if exists(destination):
-        if (
-            destination.is_dir()
-            and not destination.is_symlink()
-        ):
-            shutil.rmtree(
-                destination
-            )
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
         else:
             destination.unlink()
 
+    source = change.source
     if source.is_symlink():
-        destination.symlink_to(
-            source.readlink()
-        )
+        destination.symlink_to(source.readlink())
+    elif source.is_file():
+        shutil.copy2(source, destination)
     else:
-        shutil.copy2(
-            source,
-            destination,
-        )
+        raise RuntimeError(f"unsupported sync source: {source}")
 
-        normalize_repo(
-            destination
-        )
-
-
-# ============================================================
-# Git status
-# ============================================================
-
-def show_git_status() -> None:
-    print()
-    say("repository status")
-
-    status = git_status()
-
-    if status:
-        print(status)
-    else:
-        success(
-            "repository is clean"
-        )
+    # The live system's $HOME is portable only as @HOME@ inside the repo.
+    if destination.is_file() and is_text_file(destination):
+        text = destination.read_text(encoding="utf-8")
+        home = str(HOME)
+        if home in text:
+            destination.write_text(text.replace(home, "@HOME@"), encoding="utf-8")
 
 
-def make_commit() -> None:
-    if not git_status():
-        info(
-            "nothing to commit"
-        )
+def apply_dconf_change(change: Change) -> None:
+    source = change.source
+    destination = change.destination
+    if source is None:
         return
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    source.unlink(missing_ok=True)
+
+
+# ============================================================
+# Commit only what this run changed
+# ============================================================
+
+
+def make_commit(changes: list[Change], dconf: Change | None) -> bool:
+    paths: list[str] = []
+
+    for change in changes:
+        relative = repo_relative(change.destination)
+        if relative is not None:
+            paths.append(relative)
+
+    if dconf is not None:
+        relative = repo_relative(dconf.destination)
+        if relative is not None:
+            paths.append(relative)
+
+    paths = sorted(set(paths))
+
+    if not paths:
+        info("this sync produced no repository changes to commit")
+        return False
 
     git(
         "add",
         "-A",
+        "--",
+        *paths,
     )
 
-    result = git(
+    staged = git(
+        "diff",
+        "--cached",
+        "--name-only",
+    ).stdout.strip()
+
+    if not staged:
+        info("nothing from this sync is staged")
+        return False
+
+    print()
+    say("creating sync commit")
+    git_live(
         "commit",
         "-m",
         "sync: update rice from live system",
+    )
+    success("git commit created")
+    return True
+
+
+# ============================================================
+# Remote synchronization
+# ============================================================
+
+
+def fetch_remote() -> None:
+    say("fetching remote...")
+    result = git_live("fetch", "--prune", check=False)
+    if result.returncode != 0:
+        raise RuntimeError("git fetch failed")
+
+
+def stash_worktree_for_git_operation() -> str | None:
+    """
+    Temporarily stash pre-existing worktree changes so merge/rebase/reset can
+    operate on a clean checkout.
+
+    The stash includes untracked files. It does not include ignored files.
+    Returns the stash object id when something was stashed.
+    """
+    if not git_status():
+        return None
+
+    info("temporarily stashing existing repository changes...")
+    info("your local changes will NOT be committed")
+
+    result = git_live(
+        "stash",
+        "push",
+        "--include-untracked",
+        "-m",
+        "alice-sync temporary worktree protection",
         check=False,
     )
 
     if result.returncode != 0:
         raise RuntimeError(
-            result.stderr.strip()
-            or "git commit failed"
+            "could not temporarily stash existing repository changes"
         )
 
-    success(
-        "git commit created"
+    stash = git(
+        "stash",
+        "list",
+        "-1",
+        "--format=%H",
+        check=False,
     )
+
+    stash_hash = stash.stdout.strip()
+    if stash.returncode != 0 or not stash_hash:
+        raise RuntimeError(
+            "temporary stash was created but could not be verified"
+        )
+
+    success("existing repository changes safely stashed")
+    return stash_hash
+
+
+def restore_worktree_stash(stash_hash: str | None) -> None:
+    """Restore a temporary stash without deleting it if a conflict occurs."""
+    if not stash_hash:
+        return
+
+    print()
+    info("restoring your pre-existing repository changes...")
+
+    current = git(
+        "stash",
+        "list",
+        "-1",
+        "--format=%H",
+        check=False,
+    )
+
+    if current.returncode != 0 or current.stdout.strip() != stash_hash:
+        warn("temporary stash is no longer the newest stash")
+        warn(f"your changes remain safely stored at stash {stash_hash}")
+        return
+
+    result = git_live(
+        "stash",
+        "pop",
+        "--index",
+        "stash@{0}",
+        check=False,
+    )
+
+    if result.returncode != 0:
+        warn("your local changes could not be restored cleanly")
+        warn(f"the temporary stash was kept at {stash_hash}")
+        warn("resolve the restore conflict, then drop the stash manually")
+        return
+
+    success("pre-existing repository changes restored")
+
+
+def managed_repo_paths() -> list[str]:
+    """Return repository-relative paths owned by the reverse synchronizer."""
+    paths: list[str] = []
+
+    paths.extend(CONFIG_DIRS)
+    paths.append("quickshell/my-shell")
+    paths.append("wallfliper")
+    paths.append("dconf/interface.ini")
+    paths.append("local/bin")
+    paths.append("Wallpapers")
+
+    paths.extend(f"home/{item}" for item in HOME_FILES)
+    paths.extend(f"home/{item}" for item in HOME_DIRS)
+
+    return list(dict.fromkeys(paths))
+
+
+def local_sync_commits() -> list[tuple[str, str]]:
+    """Return local-only commits as (sha, subject), oldest first."""
+    result = git(
+        "log",
+        "--reverse",
+        "--format=%H%x09%s",
+        "@{u}..HEAD",
+        check=False,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError("could not inspect local commits")
+
+    commits: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        sha, subject = line.split("\t", 1)
+        commits.append((sha, subject))
+
+    return commits
+
+
+def make_recovery_ref() -> str:
+    stamp = str(int(time.time()))
+    ref = f"refs/alice-sync/recovery-{stamp}"
+    git("update-ref", ref, "HEAD")
+    return ref
+
+
+def restore_branch_from_ref(ref: str) -> None:
+    git_live("reset", "--hard", ref)
+
+
+def rewrite_old_sync_history() -> bool:
+    """
+    Repair an old reverse-sync commit that accidentally committed unrelated
+    repository files.
+
+    A sync commit is reconstructed from the net diff of all local-only
+    sync commits, restricted to managed repository paths. This deliberately
+    excludes files such as install.sh, README.md, install.py, and sync.py.
+
+    Returns True when the branch was rewritten, otherwise False.
+    """
+    commits = local_sync_commits()
+    if not commits:
+        return False
+
+    sync_prefix = "sync: update rice from live system"
+    if not all(subject.startswith(sync_prefix) for _, subject in commits):
+        return False
+
+    merge_base = git(
+        "merge-base",
+        "HEAD",
+        "@{u}",
+    ).stdout.strip()
+    if not merge_base:
+        raise RuntimeError("could not determine the branch merge base")
+
+    pathspecs = managed_repo_paths()
+    diff_pathspecs = [
+        *pathspecs,
+        ":(exclude)niri/parts/output.kdl",
+    ]
+
+    diff = git(
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        merge_base,
+        "HEAD",
+        "--",
+        *diff_pathspecs,
+    ).stdout
+
+    recovery_ref = make_recovery_ref()
+    info(f"saved old local history at {recovery_ref}")
+
+    info("discarding unrelated files from old sync history")
+    git_live("reset", "--hard", "@{u}")
+
+    if not diff.strip():
+        success(
+            "old sync commit contained no managed changes; local branch aligned with remote"
+        )
+        info(f"recovery ref retained: {recovery_ref}")
+        return True
+
+    info("reapplying managed changes from the old sync commit")
+
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(DOTFILES),
+            "apply",
+            "--3way",
+            "--index",
+            "-",
+        ],
+        input=diff,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        restore_branch_from_ref(recovery_ref)
+        message = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            "could not safely reapply managed changes from the old sync "
+            + (f"commit: {message}" if message else "commit")
+            + f"; repository restored from {recovery_ref}"
+        )
+
+    staged = git(
+        "diff",
+        "--cached",
+        "--name-only",
+    ).stdout.splitlines()
+
+    allowed = set(pathspecs)
+    if any(
+        not any(path == spec or path.startswith(spec.rstrip("/") + "/")
+                for spec in allowed)
+        for path in staged
+    ):
+        # This should never happen because the patch was path-limited, but
+        # keep a belt-and-suspenders check before creating a new commit.
+        restore_branch_from_ref(recovery_ref)
+        raise RuntimeError(
+            "managed-history repair selected an unexpected repository path; "
+            f"repository restored from {recovery_ref}"
+        )
+
+    git_live(
+        "commit",
+        "-m",
+        "sync: update rice from live system",
+    )
+
+    success("old sync history rebuilt using managed files only")
+    info(f"recovery ref retained: {recovery_ref}")
+    return True
+
+
+def integrate_remote() -> None:
+    upstream = upstream_ref()
+    if upstream is None:
+        branch = current_branch()
+        if not branch:
+            raise RuntimeError("repository is in detached HEAD state")
+        warn(f"branch '{branch}' has no upstream remote")
+        return
+
+    behind, ahead = remote_counts()
+    info(f"remote status: {ahead} ahead locally, {behind} behind remote")
+
+    if behind == 0:
+        return
+
+    if ahead == 0:
+        say("fast-forwarding local repository")
+        git_live("merge", "--ff-only", "@{u}")
+        success("local repository fast-forwarded")
+        return
+
+    # Old versions of this synchronizer could accidentally create a
+    # `sync:` commit containing every dirty repository file. If that old
+    # commit is all the local branch has, repair it from managed paths rather
+    # than trying to rebase unrelated installer/docs files.
+    if rewrite_old_sync_history():
+        return
+
+    say("remote contains commits not in the local branch")
+    info("rebasing local commits onto the remote branch...")
+
+    result = git_live(
+        "rebase",
+        "@{u}",
+        check=False,
+    )
+
+    if result.returncode != 0:
+        abort = git_live(
+            "rebase",
+            "--abort",
+            check=False,
+        )
+        if abort.returncode == 0:
+            warn("automatic rebase could not reconcile the branches")
+            warn("the rebase was safely aborted")
+        else:
+            warn("rebase failed and Git could not automatically abort it")
+        raise RuntimeError("git rebase failed")
+
+    success("local commits rebased onto remote")
 
 
 def push_repo() -> None:
-    result = git(
-        "push",
-        check=False,
-    )
+    upstream = upstream_ref()
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            result.stderr.strip()
-            or "git push failed"
-        )
+    if upstream is None:
+        branch = current_branch()
+        if not branch:
+            raise RuntimeError("repository is in detached HEAD state")
 
-    success(
-        "repository pushed"
-    )
+        remotes = git("remote").stdout.splitlines()
+        if not remotes:
+            raise RuntimeError("repository has no configured git remote")
 
+        remote = remotes[0].strip()
+        stash_hash = stash_worktree_for_git_operation()
+        try:
+            say(f"setting upstream: {remote}/{branch}")
+            result = git_live(
+                "push",
+                "-u",
+                remote,
+                branch,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError("git push failed")
+        finally:
+            restore_worktree_stash(stash_hash)
 
-# ============================================================
-# Remote repo -> project folder
-# ============================================================
-
-def sync_project_from_remote() -> None:
-
-    clear_screen()
-
-    print()
-    print(
-        f"{PINK}{BOLD}"
-        "sync project folder from remote repo"
-        f"{RESET} {DIM}:3{RESET}"
-    )
-
-    print(
-        f"{GRAY}{DOTFILES}{RESET}"
-    )
-
-    print()
-
-    if git_status():
-        warn(
-            "project folder has uncommitted changes"
-        )
-
-        print()
-        print(
-            git_status()
-        )
-
-        print()
-        warn(
-            "nothing was changed"
-        )
-
+        success("repository pushed")
         return
 
-    branch = git(
-        "branch",
-        "--show-current",
-    ).stdout.strip()
+    stash_hash = stash_worktree_for_git_operation()
 
+    try:
+        for attempt in range(2):
+            fetch_remote()
+            integrate_remote()
+
+            say("pushing to GitHub...")
+            result = git_live("push", check=False)
+            if result.returncode == 0:
+                success("repository pushed")
+                return
+
+            if attempt == 0:
+                warn("remote changed during push; fetching again")
+                time.sleep(1)
+                continue
+
+            raise RuntimeError(
+                "git push was rejected after the remote changed again"
+            )
+    finally:
+        restore_worktree_stash(stash_hash)
+
+
+# ============================================================
+# Remote -> local project sync
+# ============================================================
+
+
+def sync_project_from_remote() -> None:
+    clear_screen()
+    print()
+    print(
+        f"{c(PINK + BOLD, 'sync project folder from remote repo')} "
+        f"{c(DIM, ':3')}"
+    )
+    print(c(GRAY, str(DOTFILES)))
+    print()
+
+    status = git_status()
+    if status:
+        warn("project folder has uncommitted changes")
+        print()
+        print(status)
+        print()
+        warn("nothing was changed")
+        return
+
+    branch = current_branch()
     if not branch:
-        raise RuntimeError(
-            "repository is in detached HEAD state"
-        )
+        raise RuntimeError("repository is in detached HEAD state")
 
-    upstream = git(
-        "rev-parse",
-        "--abbrev-ref",
-        "--symbolic-full-name",
-        "@{u}",
-        check=False,
-    ).stdout.strip()
-
-    if not upstream:
+    upstream = upstream_ref()
+    if upstream is None:
         raise RuntimeError(
             f"branch '{branch}' has no upstream remote"
         )
 
-    info(
-        f"branch: {branch}"
-    )
+    info(f"branch: {branch}")
+    info(f"upstream: {upstream}")
 
-    info(
-        f"upstream: {upstream}"
-    )
+    fetch_remote()
+    behind, ahead = remote_counts()
 
-    info(
-        "fetching remote..."
-    )
-
-    result = git(
-        "fetch",
-        "--prune",
-        check=False,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            result.stderr.strip()
-            or "git fetch failed"
-        )
-
-    local = git(
-        "rev-parse",
-        "HEAD",
-    ).stdout.strip()
-
-    remote = git(
-        "rev-parse",
-        "@{u}",
-    ).stdout.strip()
-
-    if local == remote:
-        success(
-            "project folder is already up to date :3"
-        )
+    if behind == 0:
+        if ahead:
+            info("local branch is ahead; no remote changes to pull")
+        else:
+            success("project folder is already up to date :3")
         return
 
-    info(
-        "pulling latest changes..."
-    )
+    if ahead == 0:
+        say("pulling latest changes...")
+        git_live("merge", "--ff-only", "@{u}")
+        success("project folder synced from remote repo :3")
+        return
 
-    result = git(
-        "pull",
-        "--ff-only",
-        check=False,
-    )
-
+    say("local and remote branches have diverged")
+    info("rebasing local commits onto the remote branch...")
+    result = git_live("rebase", "@{u}", check=False)
     if result.returncode != 0:
-        raise RuntimeError(
-            result.stderr.strip()
-            or "git pull failed"
-        )
+        warn("rebase stopped because Git reported a conflict")
+        raise RuntimeError("git rebase failed; resolve conflicts and rerun")
 
-    success(
-        "project folder synced from remote repo :3"
-    )
+    success("project folder reconciled with remote repo :3")
 
 
 # ============================================================
-# Sync operation
+# Main sync operation
 # ============================================================
+
 
 def run_sync(
     *,
@@ -1490,88 +1353,105 @@ def run_sync(
     commit: bool = False,
     push: bool = False,
 ) -> None:
-
     clear_screen()
 
     print()
-    print(
-        f"{PINK}{BOLD}"
-        "alice's reverse rice sync"
-        f"{RESET} {DIM}:3{RESET}"
-    )
-
-    print(
-        f"{GRAY}"
-        "live system → dotfiles repository"
-        f"{RESET}"
-    )
+    print(c(PINK + BOLD, "alice's reverse rice sync") + " " + c(DIM, ":3"))
+    print(c(GRAY, "live system → dotfiles repository"))
 
     if dry:
-        print(
-            f"{YELLOW}"
-            "DRY RUN: nothing will be changed"
-            f"{RESET}"
-        )
-
+        print(c(YELLOW, "DRY RUN: nothing will be changed"))
     if adopt_new:
-        print(
-            f"{CYAN}"
-            "ADOPT NEW: recent managed files may be added"
-            f"{RESET}"
-        )
-
+        print(c(CYAN, "ADOPT NEW: recent managed files may be added"))
     if prune:
-        print(
-            f"{RED}"
-            "PRUNE: tracked repo files missing live "
-            "can be deleted"
-            f"{RESET}"
-        )
+        print(c(RED, "PRUNE: tracked repo files missing live can be deleted"))
 
     print()
+
+    # Snapshot repository state before doing anything. These are NOT ours.
+    initial_dirty = git_status_paths()
+    if initial_dirty:
+        warn("existing repository changes detected; they will not be committed")
+        for path in sorted(initial_dirty):
+            print(f"    {c(GRAY, path)}")
 
     changes = build_plan(
         prune=prune,
         adopt_new=adopt_new,
     )
+    changes = filter_conflicts(changes, initial_dirty)
 
-    print_changes(
-        changes
-    )
+    print_changes(changes)
 
-    sync_dconf(
-        dconf_live(),
-        dry=dry,
-    )
+    dconf = dconf_change(dconf_live())
+    if dconf is not None:
+        rel = repo_relative(dconf.destination)
+        if rel in initial_dirty:
+            warn(f"skipping {rel}: repository file already had local changes")
+            dconf.source.unlink(missing_ok=True)
+            dconf = None
+        else:
+            print()
+            print(f"    {c(YELLOW, '[UPD]')} dconf:/org/gnome/desktop/interface/")
+            print(f"         {c(GRAY, 'TO:  ')} {dconf.destination}")
 
     if dry:
+        if dconf is not None:
+            dconf.source.unlink(missing_ok=True)
         print()
-        success(
-            f"dry-run finished: "
-            f"{len(changes)} file change(s)"
-        )
+        success(f"dry-run finished: {len(changes)} file change(s)")
         return
 
     for change in changes:
-        apply_change(
-            change
-        )
+        apply_change(change)
+
+    if dconf is not None:
+        apply_dconf_change(dconf)
 
     print()
-    show_git_status()
+    say("repository status")
+    status_after = git_status()
+    if status_after:
+        print(status_after)
+    else:
+        success("repository is clean")
 
-    if commit:
-        print()
-        make_commit()
+    if commit or push:
+        make_commit(changes, dconf)
 
     if push:
         print()
         push_repo()
 
     print()
-    success(
-        "reverse sync finished :3"
-    )
+    success("reverse sync finished :3")
+
+
+# ============================================================
+# Discovery / status helpers
+# ============================================================
+
+
+def show_status() -> None:
+    clear_screen()
+    print()
+    say("repository status")
+    status = git_status()
+    if status:
+        print(status)
+    else:
+        success("repository is clean")
+
+    upstream = upstream_ref()
+    if upstream:
+        try:
+            fetch_remote()
+            behind, ahead = remote_counts()
+            print()
+            info(f"upstream: {upstream}")
+            info(f"ahead: {ahead}   behind: {behind}")
+        except Exception as exc:
+            warn(str(exc))
 
 
 # ============================================================
@@ -1586,7 +1466,7 @@ MENU = (
     ("5", "sync + commit"),
     ("6", "sync + commit + push"),
     ("7", "sync + prune tracked files"),
-    ("8", "show git status"),
+    ("8", "show git + remote status"),
     ("9", "sync project folder from remote repo"),
     ("10", "exit"),
 )
@@ -1594,153 +1474,67 @@ MENU = (
 
 def show_menu() -> None:
     clear_screen()
-
     print()
+    print(c(PINK, "╭──────────────────────────────────────────────╮"))
     print(
-        f"{PINK}"
-        "╭──────────────────────────────────────────────╮"
-        f"{RESET}"
+        c(PINK, "│") + " " +
+        c(WHITE + BOLD, "alice's reverse rice sync") + " " +
+        c(DIM, ":3")
     )
-
     print(
-        f"{PINK}│{RESET} "
-        f"{WHITE}{BOLD}"
-        "alice's reverse rice sync"
-        f"{RESET} {DIM}:3{RESET}"
+        f"{c(PINK, '│')} "
+        f"{c(GRAY, 'live system → dotfiles repository')}"
     )
-
-    print(
-        f"{PINK}│{RESET} "
-        f"{GRAY}"
-        "live system → dotfiles repository"
-        f"{RESET}"
-    )
-
-    print(
-        f"{PINK}"
-        "╰──────────────────────────────────────────────╯"
-        f"{RESET}"
-    )
-
+    print(c(PINK, "╰──────────────────────────────────────────────╯"))
     print()
-
-    print(
-        f"{PURPLE}{BOLD}"
-        "what should i do?"
-        f"{RESET}"
-    )
-
+    print(c(PURPLE + BOLD, "what should i do?"))
     print()
-
     for number, label in MENU:
-        print(
-            f"  {PINK}{number:>2}{RESET}  "
-            f"{label}"
-        )
-
+        print(f"  {c(PINK, number.rjust(2))}  {label}")
     print()
 
 
 def interactive() -> None:
-
     while True:
         show_menu()
-
         try:
-            choice = input(
-                f"{WHITE}choice: {RESET}"
-            ).strip()
-
-        except (
-            EOFError,
-            KeyboardInterrupt,
-        ):
+            choice = input(f"{WHITE}choice: {RESET}").strip()
+        except (EOFError, KeyboardInterrupt):
             print()
-            info(
-                "bye :3"
-            )
+            info("bye :3")
             return
 
         try:
             if choice == "1":
                 run_sync()
-
             elif choice == "2":
-                run_sync(
-                    adopt_new=True
-                )
-
+                run_sync(adopt_new=True)
             elif choice == "3":
                 clear_screen()
-
                 print()
-                print(
-                    f"{PINK}{BOLD}"
-                    "new rice file discovery"
-                    f"{RESET} {DIM}:3{RESET}"
-                )
-
+                print(c(PINK + BOLD, "new rice file discovery") + " " + c(DIM, ":3"))
                 print()
-
-                candidates = (
-                    discover_new()
-                )
-
-                print_changes(
-                    candidates
-                )
-
-                pause()
-                continue
-
+                print_changes(discover_new())
             elif choice == "4":
-                run_sync(
-                    dry=True
-                )
-
+                run_sync(dry=True)
             elif choice == "5":
-                run_sync(
-                    commit=True
-                )
-
+                run_sync(commit=True)
             elif choice == "6":
-                run_sync(
-                    commit=True,
-                    push=True,
-                )
-
+                run_sync(commit=True, push=True)
             elif choice == "7":
-                run_sync(
-                    prune=True
-                )
-
+                run_sync(prune=True)
             elif choice == "8":
-                clear_screen()
-                show_git_status()
-
+                show_status()
             elif choice == "9":
                 sync_project_from_remote()
-
-            elif choice in {
-                "10",
-                "q",
-                "Q",
-            }:
+            elif choice in {"10", "q", "Q"}:
                 clear_screen()
-                info(
-                    "bye :3"
-                )
+                info("bye :3")
                 return
-
             else:
-                warn(
-                    "please enter 1-10"
-                )
-
+                warn("please enter 1-10")
         except Exception as exc:
-            error(
-                str(exc)
-            )
+            error(str(exc))
 
         pause()
 
@@ -1749,151 +1543,73 @@ def interactive() -> None:
 # CLI
 # ============================================================
 
-def print_help() -> None:
-    print(__doc__)
+
+def usage() -> None:
+    print(__doc__.strip())
 
 
-def handle_cli(
-    args: list[str],
-) -> bool:
+def validate_repo() -> None:
+    if os.geteuid() == 0:
+        raise RuntimeError("do not run this script as root")
+    if shutil.which("git") is None:
+        raise RuntimeError("git is required")
+    if not (DOTFILES / ".git").is_dir():
+        raise RuntimeError("sync.py must be inside your dotfiles git repository")
 
-    if not args:
-        return False
 
-    if (
-        "--help" in args
-        or "-h" in args
-    ):
-        print_help()
-        return True
+def main(argv: list[str]) -> int:
+    validate_repo()
 
-    valid = {
+    if not argv:
+        interactive()
+        return 0
+
+    if argv == ["--help"] or argv == ["-h"]:
+        usage()
+        return 0
+
+    allowed = {
         "--dry-run",
         "--discover",
         "--adopt-new",
         "--prune",
         "--commit",
         "--push",
+        "--remote-sync",
     }
 
-    unknown = [
-        arg
-        for arg in args
-        if arg not in valid
-    ]
-
+    unknown = [arg for arg in argv if arg not in allowed]
     if unknown:
-        raise RuntimeError(
-            f"unknown option: {unknown[0]}"
-        )
+        raise RuntimeError(f"unknown option: {unknown[0]}")
 
-    if "--discover" in args:
-        run_discover_cli()
-        return True
-
-    run_sync(
-        dry="--dry-run" in args,
-        prune="--prune" in args,
-        adopt_new="--adopt-new" in args,
-        commit=(
-            "--commit" in args
-            or "--push" in args
-        ),
-        push="--push" in args,
-    )
-
-    return True
-
-
-def run_discover_cli() -> None:
-    clear_screen()
-
-    print()
-    print(
-        f"{PINK}{BOLD}"
-        "new rice file discovery"
-        f"{RESET} {DIM}:3{RESET}"
-    )
-
-    print()
-
-    candidates = discover_new()
-
-    print_changes(
-        candidates
-    )
-
-
-# ============================================================
-# Validation
-# ============================================================
-
-def validate() -> None:
-
-    if os.geteuid() == 0:
-        raise RuntimeError(
-            "do not run this script as root"
-        )
-
-    if shutil.which("git") is None:
-        raise RuntimeError(
-            "git is required"
-        )
-
-    if not (
-        DOTFILES / ".git"
-    ).exists():
-        raise RuntimeError(
-            "this script must be inside "
-            "your dotfiles git repository"
-        )
-
-
-# ============================================================
-# Main
-# ============================================================
-
-def main() -> int:
-
-    try:
-        validate()
-
-        if handle_cli(
-            sys.argv[1:]
-        ):
-            return 0
-
-        interactive()
+    if "--remote-sync" in argv:
+        sync_project_from_remote()
         return 0
 
-    except KeyboardInterrupt:
-        print()
-        info(
-            "cancelled :3"
-        )
-        return 130
+    if "--discover" in argv:
+        run_sync(dry=True, adopt_new=True)
+        return 0
 
-    except subprocess.CalledProcessError as exc:
-        error(
-            exc.stderr.strip()
-            if exc.stderr
-            else "command failed"
-        )
-
-        return (
-            exc.returncode
-            or 1
-        )
-
-    except Exception as exc:
-        error(
-            str(exc)
-        )
-
-        return 1
+    run_sync(
+        dry="--dry-run" in argv,
+        adopt_new="--adopt-new" in argv,
+        prune="--prune" in argv,
+        commit=("--commit" in argv or "--push" in argv),
+        push="--push" in argv,
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(
-        main()
-    )
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        print()
+        info("cancelled :3")
+        raise SystemExit(130)
+    except subprocess.CalledProcessError as exc:
+        error(exc.stderr.strip() if exc.stderr else "command failed")
+        raise SystemExit(exc.returncode or 1)
+    except Exception as exc:
+        error(str(exc))
+        raise SystemExit(1)
