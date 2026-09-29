@@ -1,4 +1,4 @@
-
+```bash
 #!/usr/bin/env bash
 #
 # Alice's Niri dotfiles installer
@@ -45,10 +45,11 @@
 #       ~/.dotfiles-backup/<timestamp>/
 #
 # UPDATE:
-#   Pulls the latest changes from the current git repository
-#   and reapplies the rice/configuration to the existing system.
+#   Local git checkout:
+#       git pull --ff-only
 #
-#   Local changes in the dotfiles repository are never overwritten.
+#   curl | bash:
+#       downloads the latest GitHub repository snapshot
 #
 # FRESH MODE:
 #   Intended for a bare Arch installation.
@@ -68,10 +69,29 @@
 set -Eeuo pipefail
 
 # ============================================================
-# Paths
+# Paths / repository bootstrap
 # ============================================================
 
-DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_URL="https://github.com/AliceTheDotfile/niri-dots-clean"
+readonly REPO_ARCHIVE_URL="https://codeload.github.com/AliceTheDotfile/niri-dots-clean/tar.gz/refs/heads/main"
+
+# When running from a real checkout, DOTFILES points to that repo.
+# When running through curl | bash, the complete repo is downloaded
+# into a temporary directory and DOTFILES is changed to that path.
+DOTFILES=""
+
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    local_script_path="${BASH_SOURCE[0]}"
+
+    if [[ -f "$local_script_path" ]]; then
+        DOTFILES="$(cd "$(dirname "$local_script_path")" && pwd -P)"
+    fi
+fi
+
+unset local_script_path
+
+# Set when the repository was downloaded automatically.
+BOOTSTRAP_DIR=""
 
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 SHARE="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -147,8 +167,9 @@ Usage:
       Install the core Niri environment.
 
   ./install.sh --update
-      Pull the newest dotfiles from git and update the
-      existing rice/configuration.
+      Pull the newest dotfiles from a local git repository,
+      or download the newest GitHub snapshot when launched
+      through curl.
 
   ./install.sh --configs-only
       Install dotfiles without packages.
@@ -165,6 +186,9 @@ Usage:
   ./install.sh --no-tui
       Run a normal full installation without the menu.
 
+Quick install:
+  curl -fsSL https://raw.githubusercontent.com/AliceTheDotfile/niri-dots-clean/main/install.sh | bash
+
 The installer NEVER touches:
   ~/.config/waybar
   ~/.config/fastfetch
@@ -176,9 +200,13 @@ The installer NEVER copies:
   ~/.local/share/kate/anonymous.katesession
 
 Update mode:
-  The dotfiles repository must be a clean git working tree.
-  Updates use:
+  Local git repository:
       git pull --ff-only
+
+  curl invocation:
+      downloads the latest repository snapshot from GitHub
+
+Local git changes are never overwritten.
 EOF
             exit 0
             ;;
@@ -255,6 +283,12 @@ pause_screen() {
 # ============================================================
 
 cleanup() {
+    if [[ -n "${BOOTSTRAP_DIR:-}" ]] &&
+       [[ -d "$BOOTSTRAP_DIR" ]]; then
+
+        rm -rf -- "$BOOTSTRAP_DIR"
+    fi
+
     printf '\033[0m\n'
 }
 
@@ -474,10 +508,77 @@ require_arch() {
         exit 1
     }
 
+    need_command sudo || {
+        fail "sudo is required by this installer"
+        exit 1
+    }
+
     [[ $EUID -ne 0 ]] || {
         fail "do not run this installer as root"
         exit 1
     }
+}
+
+# ============================================================
+# GitHub repository bootstrap
+# ============================================================
+
+repo_is_complete() {
+    [[ -n "$DOTFILES" ]] || return 1
+
+    [[ -f "$DOTFILES/install.sh" ]] || return 1
+    [[ -d "$DOTFILES/niri" ]] || return 1
+    [[ -d "$DOTFILES/quickshell/my-shell" ]] || return 1
+    [[ -d "$DOTFILES/wallfliper" ]] || return 1
+    [[ -d "$DOTFILES/local/bin" ]] || return 1
+    [[ -d "$DOTFILES/Wallpapers" ]] || return 1
+}
+
+bootstrap_repo() {
+    if repo_is_complete; then
+        return 0
+    fi
+
+    need_command curl || {
+        fail "curl is required to download the dotfiles repository"
+        fail "install curl first, then run this installer again"
+        return 1
+    }
+
+    need_command tar || {
+        fail "tar is required to extract the dotfiles repository"
+        fail "install tar first, then run this installer again"
+        return 1
+    }
+
+    BOOTSTRAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/alice-niri-dots.XXXXXXXX")"
+
+    local archive="$BOOTSTRAP_DIR/repo.tar.gz"
+
+    say "downloading Alice's latest Niri dots"
+
+    curl \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --retry 3 \
+        --retry-delay 1 \
+        "$REPO_ARCHIVE_URL" \
+        -o "$archive"
+
+    say "extracting dotfiles"
+
+    tar \
+        -xzf "$archive" \
+        --strip-components=1 \
+        -C "$BOOTSTRAP_DIR"
+
+    rm -f "$archive"
+
+    DOTFILES="$BOOTSTRAP_DIR"
+
+    success "latest dotfiles downloaded"
 }
 
 # ============================================================
@@ -531,6 +632,13 @@ validate_repo() {
 # ============================================================
 
 update_repo() {
+    # curl | bash already downloaded the latest main snapshot.
+    if [[ -n "${BOOTSTRAP_DIR:-}" ]]; then
+        say "using the latest GitHub snapshot"
+        success "dotfiles are already up to date"
+        return 0
+    fi
+
     need_command git || {
         fail "git is required for update mode"
         return 1
@@ -762,9 +870,9 @@ replace_home_token() {
     (( DRY )) && return 0
     [[ -e "$path" ]] || return 0
 
-    grep -rIl -- '@HOME@' "$path" 2>/dev/null \
-        | xargs -r sed -i "s|@HOME@|$HOME|g" \
-        || true
+    grep -rIl -- '@HOME@' "$path" 2>/dev/null |
+        xargs -r sed -i "s|@HOME@|$HOME|g" ||
+        true
 }
 
 # ============================================================
@@ -1474,8 +1582,21 @@ show_summary() {
     printf " ${PINK}╰──────────────────────────────────────────────────────╯${RESET}\n\n"
 
     if [[ "$MODE" == "update" ]]; then
-        success "existing rice updated from git"
+        success "existing rice updated from the latest repo"
         success "latest repo configuration applied"
+
+    elif [[ "$MODE" == "packages" ]]; then
+        if (( MINIMAL )); then
+            success "core packages installed"
+        else
+            success "desktop packages installed"
+        fi
+
+    elif [[ "$MODE" == "configs" ]]; then
+        success "desktop configs installed"
+        success "shell / Kate / theme files installed"
+        success "Wallfliper installed"
+
     elif (( FRESH )); then
         success "fresh Arch desktop installed"
         success "Niri installed"
@@ -1483,8 +1604,10 @@ show_summary() {
         success "Wallfliper installed"
         success "greetd + tuigreet configured"
         success "NetworkManager + Bluetooth configured"
+
     elif (( MINIMAL )); then
         success "minimal Niri setup installed"
+
     else
         success "Niri desktop installed"
         success "Kate installed and configured"
@@ -1512,10 +1635,21 @@ show_summary() {
         printf "  ${GRAY}•${RESET} reboot\n"
         printf "  ${GRAY}•${RESET} log in through ${PINK}tuigreet${RESET}\n"
         printf "  ${GRAY}•${RESET} launch ${PINK}Niri${RESET}\n"
+
     elif [[ "$MODE" == "update" ]]; then
         printf "${WHITE}${BOLD}update next step:${RESET}\n\n"
         printf "  ${GRAY}•${RESET} restart Niri / Quickshell if needed\n"
         printf "  ${GRAY}•${RESET} open a new shell if PATH changed\n"
+
+    elif [[ "$MODE" == "packages" ]]; then
+        printf "${WHITE}${BOLD}next step:${RESET}\n\n"
+        printf "  ${GRAY}•${RESET} restart your shell if PATH changed\n"
+
+    elif [[ "$MODE" == "configs" ]]; then
+        printf "${WHITE}${BOLD}next step:${RESET}\n\n"
+        printf "  ${GRAY}•${RESET} restart Niri / Quickshell if needed\n"
+        printf "  ${GRAY}•${RESET} open a new shell if PATH changed\n"
+
     else
         printf "${WHITE}${BOLD}next step:${RESET}\n\n"
         printf "  ${GRAY}•${RESET} restart Niri / Quickshell if needed\n"
@@ -1531,9 +1665,14 @@ show_summary() {
 # ============================================================
 
 main() {
-    cd "$DOTFILES"
-
     require_arch
+
+    # packages-only does not need the repository at all.
+    # Everything else needs the repository contents.
+    if [[ "$MODE" != "packages" ]]; then
+        bootstrap_repo
+        cd "$DOTFILES"
+    fi
 
     case "$MODE" in
         fresh)
@@ -1603,22 +1742,27 @@ main() {
             ;;
 
         1)
+            MODE="update"
             do_update
             ;;
 
         2)
+            MODE="fresh"
             do_fresh_install
             ;;
 
         3)
+            MODE="minimal"
             do_minimal_install
             ;;
 
         4)
+            MODE="configs"
             do_configs_only
             ;;
 
         5)
+            MODE="packages"
             do_packages_only
             ;;
 
@@ -1638,4 +1782,4 @@ main() {
 }
 
 main "$@"
-
+```

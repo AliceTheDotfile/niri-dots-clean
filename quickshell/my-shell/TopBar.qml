@@ -19,7 +19,16 @@ Item {
     readonly property int triggerWidth: 180
     readonly property int triggerHeight: 3
     readonly property int borderWidth: 2
+
+    // Drawer animation
     readonly property int animationDuration: 120
+
+    // Trigger bar animation -- these are independent from the drawer.
+    readonly property int triggerExpandDuration: 200
+    readonly property int triggerCollapseDuration: 200
+    readonly property int triggerColorDuration: 100
+    readonly property int triggerAnimationEasing: Easing.OutCubic
+
     readonly property int hideDelay: 300
     readonly property real panelOpacity: 0.95
 
@@ -47,6 +56,11 @@ Item {
     property bool insideTrigger: false
     property bool insideDrawer: false
     property real progress: 0
+
+    readonly property bool triggerBarExpanded:
+        root.insideTrigger ||
+        root.insideDrawer ||
+        root.progress > 0
     property string activeMenu: ""
 
     property real volumeLevel: 0.70
@@ -759,43 +773,43 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
 
             height:
-            root.insideTrigger ||
-            root.insideDrawer ||
-            root.progress > 0
+            root.triggerBarExpanded
             ? root.borderWidth
             : root.triggerHeight
 
             width:
-            root.insideTrigger ||
-            root.insideDrawer ||
-            root.progress > 0
+            root.triggerBarExpanded
             ? root.panelWidth
             : root.triggerWidth
 
             color:
-            root.insideTrigger ||
-            root.insideDrawer ||
-            root.progress > 0
+            root.triggerBarExpanded
             ? root.colAccent
             : root.colViolet
 
             Behavior on width {
                 NumberAnimation {
-                    duration: root.animationDuration
-                    easing.type: Easing.OutCubic
+                    duration:
+                        root.triggerBarExpanded
+                        ? root.triggerExpandDuration
+                        : root.triggerCollapseDuration
+                    easing.type: root.triggerAnimationEasing
                 }
             }
 
             Behavior on height {
                 NumberAnimation {
-                    duration: root.animationDuration
-                    easing.type: Easing.OutCubic
+                    duration:
+                        root.triggerBarExpanded
+                        ? root.triggerExpandDuration
+                        : root.triggerCollapseDuration
+                    easing.type: root.triggerAnimationEasing
                 }
             }
 
             Behavior on color {
                 ColorAnimation {
-                    duration: root.animationDuration
+                    duration: root.triggerColorDuration
                 }
             }
         }
