@@ -27,9 +27,14 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install.sh" && -d "$SCRIPT_DIR/niri" ]
     cd -- "$SCRIPT_DIR"
 fi
 
-# The Python installer is embedded below. Reading it from fd 3 keeps the
-# normal stdin attached to the terminal, so the interactive menu still works
-# when install.sh itself was piped through curl.
+# The Python installer is embedded below. The Python source comes from fd 3,
+# while stdin stays available for the interactive installer. When install.sh
+# is piped through curl, Bash receives the script on stdin, so reconnect stdin
+# to the user's terminal before launching Python.
+if [[ ! -t 0 && -r /dev/tty ]]; then
+    exec </dev/tty
+fi
+
 command -v python3 >/dev/null 2>&1 || {
     if command -v sudo >/dev/null 2>&1 && command -v pacman >/dev/null 2>&1; then
         printf '\033[38;5;205m::\033[0m Python 3 is required; installing it...\n'
