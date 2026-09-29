@@ -20,9 +20,9 @@ Item {
     readonly property int triggerHeight: 3
     readonly property int borderWidth: 2
 
-    readonly property int animationDuration: 120
-    readonly property int triggerExpandDuration: 200
-    readonly property int triggerCollapseDuration: 200
+    readonly property int animationDuration: 180
+    readonly property int triggerExpandDuration: 300
+    readonly property int triggerCollapseDuration: 150
     readonly property int triggerColorDuration: 100
     readonly property int hideDelay: 300
     readonly property real panelOpacity: 0.95
@@ -31,29 +31,27 @@ Item {
     // EASING
     // ============================================================
     //
-    // Cubic Bezier:
-    //   easeX1/easeY1 = first control point
-    //   easeX2/easeY2 = second control point
+    // Opening:
+    //   smooth cubic deceleration.
     //
-    // Increase easeX2 to make the animation stay fast longer,
-    // then slow down harder near the end.
+    // Closing:
+    //   exponential deceleration. Starts quickly and slows
+    //   dramatically as it approaches the end.
     //
-    // Examples:
-    //   0.15 / 0.85 / 0.35 / 1.0 = snappy
-    //   0.10 / 0.85 / 0.75 / 1.0 = long smooth slowdown
-    //   0.05 / 0.95 / 0.90 / 1.0 = very fast then brakes hard
+    // Try:
+    //   Easing.OutQuad
+    //   Easing.OutCubic
+    //   Easing.OutQuart
+    //   Easing.OutQuint
+    //   Easing.OutExpo
+    //
+    // OutExpo gives the strongest "WHOOSH -> crawl -> stop" effect.
 
-    readonly property real easeX1: 0.10
-    readonly property real easeY1: 0.85
-    readonly property real easeX2: 0.75
-    readonly property real easeY2: 1.00
+    readonly property int openingEasing: Easing.OutCubic
+    readonly property int closingEasing: Easing.OutExpo
 
-    readonly property var easeCurve: [
-        0, 0,
-        root.easeX1, root.easeY1,
-        root.easeX2, root.easeY2,
-        1, 1
-    ]
+    readonly property int triggerOpeningEasing: Easing.OutCubic
+    readonly property int triggerClosingEasing: Easing.OutExpo
 
     // ============================================================
     // COLORS
@@ -96,30 +94,41 @@ Item {
     readonly property int batteryPercentage: {
         if (root.sysBatteryPct >= 0)
             return root.sysBatteryPct
+
             if (root.battery && root.battery.ready) {
                 const p = root.battery.percentage
                 return Math.round(p <= 1 ? p * 100 : p)
             }
+
             return 0
     }
 
     readonly property bool batteryCharging: {
         if (root.sysBatteryPct >= 0)
             return root.sysBatteryCharging
+
             if (root.battery && root.battery.ready)
-                return root.battery.changeRate > 0 || root.battery.batteryState === 1
+                return root.battery.changeRate > 0 ||
+                root.battery.batteryState === 1
+
                 return false
     }
 
     readonly property color batteryColor:
-    !root.hasBattery ? root.colFgBright
-    : root.batteryPercentage <= 15 ? root.colAccent
-    : root.batteryPercentage <= 30 ? root.colPink
-    : root.batteryCharging ? root.colRose
+    !root.hasBattery
+    ? root.colFgBright
+    : root.batteryPercentage <= 15
+    ? root.colAccent
+    : root.batteryPercentage <= 30
+    ? root.colPink
+    : root.batteryCharging
+    ? root.colRose
     : root.colFgBright
 
     readonly property bool triggerBarExpanded:
-    root.insideTrigger || root.insideDrawer || root.progress > 0
+    root.insideTrigger ||
+    root.insideDrawer ||
+    root.progress > 0
 
     // ============================================================
     // CLOCK
@@ -131,7 +140,8 @@ Item {
         repeat: true
         triggeredOnStart: true
 
-        onTriggered: root.currentTime =
+        onTriggered:
+        root.currentTime =
         Qt.formatDateTime(new Date(), "hh:mm:ss AP")
     }
 
@@ -140,20 +150,29 @@ Item {
     // ============================================================
 
     readonly property var btAdapter: Bluetooth.defaultAdapter
+
     readonly property var btDevices:
-    Bluetooth.devices ? Bluetooth.devices.values : []
+    Bluetooth.devices
+    ? Bluetooth.devices.values
+    : []
 
     readonly property bool bluetoothEnabled:
-    root.btAdapter !== null && root.btAdapter.enabled
+    root.btAdapter !== null &&
+    root.btAdapter.enabled
 
     readonly property bool bluetoothScanning:
-    root.btAdapter !== null && root.btAdapter.discovering
+    root.btAdapter !== null &&
+    root.btAdapter.discovering
 
     readonly property string bluetoothDeviceName: {
         for (const d of root.btDevices) {
             if (d && d.connected)
-                return d.name || d.deviceName || d.address || ""
+                return d.name ||
+                d.deviceName ||
+                d.address ||
+                ""
         }
+
         return ""
     }
 
@@ -172,9 +191,11 @@ Item {
     Timer {
         interval: 250
         repeat: true
-        running: root.activeMenu === "bt"
         triggeredOnStart: true
-        onTriggered: root.refreshBtModels()
+        running: root.activeMenu === "bt"
+
+        onTriggered:
+        root.refreshBtModels()
     }
 
     Timer {
@@ -195,8 +216,10 @@ Item {
         if (root.activeMenu === menu) {
             root.activeMenu = ""
             menuScanDelayTimer.stop()
+
             if (menu === "bt")
                 root.stopBtDiscovery()
+
                 return
         }
 
@@ -217,6 +240,7 @@ Item {
             if (d && d.address === mac)
                 return d
         }
+
         return null
     }
 
@@ -237,9 +261,13 @@ Item {
                         nearby.push(d)
         }
 
-        const sortDevices = (a, b) => {
-            const an = (a.name || a.deviceName || a.address).toLowerCase()
-            const bn = (b.name || b.deviceName || b.address).toLowerCase()
+        const sortDevices = function(a, b) {
+            const an =
+            (a.name || a.deviceName || a.address).toLowerCase()
+
+            const bn =
+            (b.name || b.deviceName || b.address).toLowerCase()
+
             return an.localeCompare(bn)
         }
 
@@ -294,6 +322,7 @@ Item {
 
     function toggleBtDevice(mac, connected) {
         const d = root.findBtDevice(mac)
+
         if (!d)
             return
 
@@ -310,11 +339,17 @@ Item {
 
     function pairBtDevice(mac) {
         const d = root.findBtDevice(mac)
+
         if (!d)
             return
 
-            Quickshell.execDetached({ command: ["bluetoothctl", "agent", "on"] })
-            Quickshell.execDetached({ command: ["bluetoothctl", "default-agent"] })
+            Quickshell.execDetached({
+                command: ["bluetoothctl", "agent", "on"]
+            })
+
+            Quickshell.execDetached({
+                command: ["bluetoothctl", "default-agent"]
+            })
 
             if (typeof d.pair === "function")
                 d.pair()
@@ -335,7 +370,7 @@ Item {
     }
 
     // ============================================================
-    // POWER
+    // POWER PROFILE
     // ============================================================
 
     Process {
@@ -349,9 +384,12 @@ Item {
         stdout: StdioCollector {
             onStreamFinished: {
                 const r = this.text.trim().toLowerCase()
+
                 root.powerProfile =
-                r === "powersave" ? "powersave"
-                : r === "performance" ? "performance"
+                r === "powersave"
+                ? "powersave"
+                : r === "performance"
+                ? "performance"
                 : "balanced"
             }
         }
@@ -359,8 +397,10 @@ Item {
 
     function setPowerProfile(mode) {
         const governor =
-        mode === "powersave" ? "powersave"
-        : mode === "performance" ? "performance"
+        mode === "powersave"
+        ? "powersave"
+        : mode === "performance"
+        ? "performance"
         : "schedutil"
 
         Quickshell.execDetached({
@@ -375,7 +415,7 @@ Item {
 
         root.powerProfile = mode
 
-        Qt.callLater(() => {
+        Qt.callLater(function() {
             if (!powerProfileStatusProc.running)
                 powerProfileStatusProc.running = true
         })
@@ -383,8 +423,10 @@ Item {
 
     function cyclePowerProfile() {
         setPowerProfile(
-            root.powerProfile === "powersave" ? "balanced"
-            : root.powerProfile === "balanced" ? "performance"
+            root.powerProfile === "powersave"
+            ? "balanced"
+            : root.powerProfile === "balanced"
+            ? "performance"
             : "powersave"
         )
     }
@@ -450,20 +492,27 @@ Item {
     Process {
         id: volumeStatusProc
 
-        command: ["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"]
+        command: [
+            "wpctl",
+            "get-volume",
+            "@DEFAULT_AUDIO_SINK@"
+        ]
 
         stdout: StdioCollector {
             onStreamFinished: {
                 const t = this.text.trim()
                 const m = t.match(/Volume:\s+([0-9.]+)/)
 
-                if (m)
-                    root.volumeLevel = Math.max(
+                if (m) {
+                    root.volumeLevel =
+                    Math.max(
                         0,
                         Math.min(1, parseFloat(m[1]))
                     )
+                }
 
-                    root.isMuted = t.indexOf("[MUTED]") !== -1
+                root.isMuted =
+                t.indexOf("[MUTED]") !== -1
             }
         }
     }
@@ -474,7 +523,8 @@ Item {
         command: [
             "sh",
             "-c",
-            "printf '%s|' \"$(nmcli -t -f WIFI radio 2>/dev/null)\"; " +
+            "printf '%s|' " +
+            "\"$(nmcli -t -f WIFI radio 2>/dev/null)\"; " +
             "nmcli -t -f IN-USE,SSID dev wifi 2>/dev/null | " +
             "sed -n 's/^*://p' | head -n1"
         ]
@@ -482,8 +532,14 @@ Item {
         stdout: StdioCollector {
             onStreamFinished: {
                 const p = this.text.trim().split("|")
-                root.wifiState = p[0] || "unknown"
-                root.wifiSsid = p.length > 1 && p[1] ? p[1] : "Wi-Fi"
+
+                root.wifiState =
+                p[0] || "unknown"
+
+                root.wifiSsid =
+                p.length > 1 && p[1]
+                ? p[1]
+                : "Wi-Fi"
             }
         }
     }
@@ -504,6 +560,7 @@ Item {
         stdout: StdioCollector {
             onStreamFinished: {
                 wifiModel.clear()
+
                 if (!this.text)
                     return
 
@@ -513,17 +570,27 @@ Item {
                         if (!raw.trim())
                             continue
 
-                            const safe = raw.replace(/\\:/g, "___COLON___")
+                            const safe =
+                            raw.replace(/\\:/g, "___COLON___")
+
                             const p = safe.split(":")
+
                             if (p.length < 4)
                                 continue
 
-                                const active = p[0].trim() === "*"
-                                const signal = p[p.length - 1].trim()
-                                const security = p[p.length - 2]
+                                const active =
+                                p[0].trim() === "*"
+
+                                const signal =
+                                p[p.length - 1].trim()
+
+                                const security =
+                                p[p.length - 2]
                                 .replace(/___COLON___/g, ":")
                                 .trim()
-                                const ssid = p.slice(1, p.length - 2)
+
+                                const ssid =
+                                p.slice(1, p.length - 2)
                                 .join(":")
                                 .replace(/___COLON___/g, ":")
                                 .trim()
@@ -554,6 +621,7 @@ Item {
             "@DEFAULT_AUDIO_SINK@",
             Math.round(pct * 100) + "%"
         ]
+
         volProc.running = true
     }
 
@@ -564,6 +632,7 @@ Item {
             "@DEFAULT_AUDIO_SINK@",
             "toggle"
         ]
+
         volProc.running = true
     }
 
@@ -573,11 +642,13 @@ Item {
                 "nmcli",
                 "radio",
                 "wifi",
-                root.wifiState === "enabled" ? "off" : "on"
+                root.wifiState === "enabled"
+                ? "off"
+                : "on"
             ]
         })
 
-        Qt.callLater(() => {
+        Qt.callLater(function() {
             if (!wifiStatusProc.running)
                 wifiStatusProc.running = true
         })
@@ -585,10 +656,16 @@ Item {
 
     function connectWifi(ssid) {
         Quickshell.execDetached({
-            command: ["nmcli", "dev", "wifi", "connect", ssid]
+            command: [
+                "nmcli",
+                "dev",
+                "wifi",
+                "connect",
+                ssid
+            ]
         })
 
-        Qt.callLater(() => {
+        Qt.callLater(function() {
             if (!wifiStatusProc.running)
                 wifiStatusProc.running = true
         })
@@ -607,16 +684,20 @@ Item {
         triggeredOnStart: true
 
         onTriggered: {
-            root.pollCycle = (root.pollCycle + 1) % 3
+            root.pollCycle =
+            (root.pollCycle + 1) % 3
 
             if (root.pollCycle === 0) {
                 if (!batteryStatusProc.running)
                     batteryStatusProc.running = true
+
                     if (!powerProfileStatusProc.running)
                         powerProfileStatusProc.running = true
+
             } else if (root.pollCycle === 1) {
                 if (!volumeStatusProc.running)
                     volumeStatusProc.running = true
+
             } else {
                 if (!wifiStatusProc.running)
                     wifiStatusProc.running = true
@@ -625,11 +706,12 @@ Item {
     }
 
     // ============================================================
-    // DRAWER
+    // DRAWER CONTROL
     // ============================================================
 
     function show() {
         hideTimer.stop()
+
         revealAnimation.from = root.progress
         revealAnimation.to = 1
         revealAnimation.restart()
@@ -647,6 +729,7 @@ Item {
             if (!root.insideTrigger && !root.insideDrawer) {
                 root.activeMenu = ""
                 root.stopBtDiscovery()
+
                 revealAnimation.from = root.progress
                 revealAnimation.to = 0
                 revealAnimation.restart()
@@ -654,18 +737,34 @@ Item {
         }
     }
 
+    // ============================================================
+    // MAIN DRAWER ANIMATION
+    // ============================================================
+    //
+    // Important:
+    //   Opening uses openingEasing.
+    //   Closing uses closingEasing.
+    //
+    // Because the animation explicitly sets `to`, the easing can be
+    // selected from the direction of the animation.
+
     NumberAnimation {
         id: revealAnimation
+
         target: root
         property: "progress"
         duration: root.animationDuration
-        easing.type: Easing.BezierSpline
-        easing.bezierCurve: root.easeCurve
+
+        easing.type:
+        to === 0
+        ? root.closingEasing
+        : root.openingEasing
     }
 
     readonly property real targetExpandedHeight: {
         if (root.activeMenu === "wifi") {
             const count = wifiModel.count
+
             return count === 0
             ? 64
             : Math.min(
@@ -673,13 +772,25 @@ Item {
                 count * 32 +
                 (count > 1 ? (count - 1) * 2 : 0) +
                 12,
-                268
+                root.maxExpandedContentHeight
             )
         }
 
         if (root.activeMenu === "bt") {
-            const paired = 26 + Math.max(btPairedModel.count * 34, 28)
-            const nearby = 26 + Math.max(btNearbyModel.count * 34, 28)
+            const paired =
+            26 +
+            Math.max(
+                btPairedModel.count * 34,
+                28
+            )
+
+            const nearby =
+            26 +
+            Math.max(
+                btNearbyModel.count * 34,
+                28
+            )
+
             return Math.min(
                 paired + nearby + 12,
                 root.maxExpandedContentHeight
@@ -694,23 +805,32 @@ Item {
     Behavior on currentExpandedHeight {
         NumberAnimation {
             duration: root.animationDuration
-            easing.type: Easing.BezierSpline
-            easing.bezierCurve: root.easeCurve
+
+            easing.type:
+            root.currentExpandedHeight >
+            root.targetExpandedHeight
+            ? root.closingEasing
+            : root.openingEasing
         }
     }
 
     onTargetExpandedHeightChanged:
-    root.currentExpandedHeight = root.targetExpandedHeight
+    root.currentExpandedHeight =
+    root.targetExpandedHeight
 
     // ============================================================
-    // TRIGGER
+    // TOP TRIGGER
     // ============================================================
 
     PanelWindow {
         screen: root.targetScreen
         anchors.top: true
         implicitWidth: root.panelWidth
-        implicitHeight: Math.max(root.triggerHeight, root.borderWidth)
+        implicitHeight:
+        Math.max(
+            root.triggerHeight,
+            root.borderWidth
+        )
         exclusiveZone: 0
         focusable: false
         color: "transparent"
@@ -719,15 +839,18 @@ Item {
             anchors.top: parent.top
             anchors.horizontalCenter: parent.horizontalCenter
 
-            height: root.triggerBarExpanded
+            height:
+            root.triggerBarExpanded
             ? root.borderWidth
             : root.triggerHeight
 
-            width: root.triggerBarExpanded
+            width:
+            root.triggerBarExpanded
             ? root.panelWidth
             : root.triggerWidth
 
-            color: root.triggerBarExpanded
+            color:
+            root.triggerBarExpanded
             ? root.colAccent
             : root.colViolet
 
@@ -737,8 +860,11 @@ Item {
                     root.triggerBarExpanded
                     ? root.triggerExpandDuration
                     : root.triggerCollapseDuration
-                    easing.type: Easing.BezierSpline
-                    easing.bezierCurve: root.easeCurve
+
+                    easing.type:
+                    root.triggerBarExpanded
+                    ? root.triggerOpeningEasing
+                    : root.triggerClosingEasing
                 }
             }
 
@@ -748,8 +874,11 @@ Item {
                     root.triggerBarExpanded
                     ? root.triggerExpandDuration
                     : root.triggerCollapseDuration
-                    easing.type: Easing.BezierSpline
-                    easing.bezierCurve: root.easeCurve
+
+                    easing.type:
+                    root.triggerBarExpanded
+                    ? root.triggerOpeningEasing
+                    : root.triggerClosingEasing
                 }
             }
 
@@ -788,12 +917,19 @@ Item {
 
         screen: root.targetScreen
         anchors.top: true
+
         implicitWidth: root.panelWidth
-        implicitHeight: root.panelHeight + root.maxExpandedContentHeight
+
+        implicitHeight:
+        root.panelHeight +
+        root.maxExpandedContentHeight
+
         exclusiveZone: 0
         focusable: true
         color: "transparent"
-        visible: root.progress > 0.01
+
+        visible:
+        root.progress > 0.01
 
         Item {
             anchors.fill: parent
@@ -803,10 +939,16 @@ Item {
                 id: panel
 
                 width: parent.width
-                height: root.panelHeight + root.currentExpandedHeight
+
+                height:
+                root.panelHeight +
+                root.currentExpandedHeight
 
                 transform: Translate {
-                    y: -panel.height + panel.height * root.progress
+                    y:
+                    -panel.height +
+                    panel.height *
+                    root.progress
                 }
 
                 color: Qt.rgba(
@@ -820,8 +962,11 @@ Item {
                     anchors.left: parent.left
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
+
                     width: root.borderWidth
-                    color: root.insideDrawer
+
+                    color:
+                    root.insideDrawer
                     ? root.colAccent
                     : root.colViolet
                 }
@@ -830,8 +975,11 @@ Item {
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
+
                     width: root.borderWidth
-                    color: root.insideDrawer
+
+                    color:
+                    root.insideDrawer
                     ? root.colAccent
                     : root.colViolet
                 }
@@ -840,8 +988,11 @@ Item {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom
+
                     height: root.borderWidth
-                    color: root.insideDrawer
+
+                    color:
+                    root.insideDrawer
                     ? root.colAccent
                     : root.colViolet
                 }
@@ -849,6 +1000,7 @@ Item {
                 HoverHandler {
                     onHoveredChanged: {
                         root.insideDrawer = hovered
+
                         if (hovered)
                             hideTimer.stop()
                             else
@@ -864,12 +1016,14 @@ Item {
                     anchors.top: parent.top
                     anchors.left: parent.left
                     anchors.right: parent.right
+
                     height: root.panelHeight
 
                     Row {
                         anchors.centerIn: parent
                         spacing: 8
 
+                        // TIME
                         Rectangle {
                             width: 78
                             height: 28
@@ -877,42 +1031,60 @@ Item {
 
                             Text {
                                 anchors.centerIn: parent
+
                                 text: root.currentTime
                                 color: root.colFgBright
-                                font.family: "JetBrainsMono Nerd Font"
+
+                                font.family:
+                                "JetBrainsMono Nerd Font"
+
                                 font.pixelSize: 8
                                 font.bold: true
                             }
                         }
 
+                        // WALL
                         Rectangle {
                             width: 58
                             height: 28
-                            color: wallHover.hovered
+
+                            color:
+                            wallHover.hovered
                             ? root.colSelBg
                             : root.colNavy
 
                             Text {
                                 anchors.centerIn: parent
+
                                 text: "WALL"
-                                color: wallHover.hovered
+
+                                color:
+                                wallHover.hovered
                                 ? root.colAccent
                                 : root.colFgBright
-                                font.family: "JetBrainsMono Nerd Font"
+
+                                font.family:
+                                "JetBrainsMono Nerd Font"
+
                                 font.pixelSize: 8
                                 font.bold: true
                             }
 
-                            HoverHandler { id: wallHover }
+                            HoverHandler {
+                                id: wallHover
+                            }
 
                             TapHandler {
-                                onTapped: wallflipperProc.startDetached()
+                                onTapped:
+                                wallflipperProc.startDetached()
                             }
                         }
 
+                        // WI-FI
                         Rectangle {
                             width: 96
                             height: 28
+
                             color:
                             wifiHover.hovered ||
                             root.activeMenu === "wifi"
@@ -921,9 +1093,14 @@ Item {
 
                             Text {
                                 anchors.centerIn: parent
+
                                 width: parent.width - 8
-                                horizontalAlignment: Text.AlignHCenter
-                                elide: Text.ElideRight
+
+                                horizontalAlignment:
+                                Text.AlignHCenter
+
+                                elide:
+                                Text.ElideRight
 
                                 text:
                                 (
@@ -941,20 +1118,26 @@ Item {
                                     : " ▼"
                                 )
 
-                                color: root.wifiState === "enabled"
+                                color:
+                                root.wifiState === "enabled"
                                 ? root.colFgBright
                                 : root.colAccent
 
-                                font.family: "JetBrainsMono Nerd Font"
+                                font.family:
+                                "JetBrainsMono Nerd Font"
+
                                 font.pixelSize: 7
                                 font.bold: true
                             }
 
-                            HoverHandler { id: wifiHover }
+                            HoverHandler {
+                                id: wifiHover
+                            }
 
                             TapHandler {
                                 acceptedButtons:
-                                Qt.LeftButton | Qt.RightButton
+                                Qt.LeftButton |
+                                Qt.RightButton
 
                                 onTapped: function(_, button) {
                                     if (button === Qt.RightButton)
@@ -965,9 +1148,11 @@ Item {
                             }
                         }
 
+                        // BLUETOOTH
                         Rectangle {
                             width: 96
                             height: 28
+
                             color:
                             bluetoothHover.hovered ||
                             root.activeMenu === "bt"
@@ -976,9 +1161,14 @@ Item {
 
                             Text {
                                 anchors.centerIn: parent
+
                                 width: parent.width - 8
-                                horizontalAlignment: Text.AlignHCenter
-                                elide: Text.ElideRight
+
+                                horizontalAlignment:
+                                Text.AlignHCenter
+
+                                elide:
+                                Text.ElideRight
 
                                 text:
                                 (
@@ -996,20 +1186,26 @@ Item {
                                     : " ▼"
                                 )
 
-                                color: root.bluetoothEnabled
+                                color:
+                                root.bluetoothEnabled
                                 ? root.colFgBright
                                 : root.colAccent
 
-                                font.family: "JetBrainsMono Nerd Font"
+                                font.family:
+                                "JetBrainsMono Nerd Font"
+
                                 font.pixelSize: 7
                                 font.bold: true
                             }
 
-                            HoverHandler { id: bluetoothHover }
+                            HoverHandler {
+                                id: bluetoothHover
+                            }
 
                             TapHandler {
                                 acceptedButtons:
-                                Qt.LeftButton | Qt.RightButton
+                                Qt.LeftButton |
+                                Qt.RightButton
 
                                 onTapped: function(_, button) {
                                     if (button === Qt.RightButton)
@@ -1020,15 +1216,19 @@ Item {
                             }
                         }
 
+                        // POWER
                         Rectangle {
                             width: 68
                             height: 28
-                            color: pwrHover.hovered
+
+                            color:
+                            pwrHover.hovered
                             ? root.colSelBg
                             : root.colNavy
 
                             Text {
                                 anchors.centerIn: parent
+
                                 text:
                                 root.powerProfile === "powersave"
                                 ? "PWR: SAV"
@@ -1043,18 +1243,24 @@ Item {
                                 ? root.colAccent
                                 : root.colFgBright
 
-                                font.family: "JetBrainsMono Nerd Font"
+                                font.family:
+                                "JetBrainsMono Nerd Font"
+
                                 font.pixelSize: 7
                                 font.bold: true
                             }
 
-                            HoverHandler { id: pwrHover }
+                            HoverHandler {
+                                id: pwrHover
+                            }
 
                             TapHandler {
-                                onTapped: root.cyclePowerProfile()
+                                onTapped:
+                                root.cyclePowerProfile()
                             }
                         }
 
+                        // BATTERY
                         Rectangle {
                             width: 58
                             height: 28
@@ -1074,44 +1280,61 @@ Item {
                                 : (
                                     root.batteryCharging
                                     ? "CHG " +
-                                    root.batteryPercentage + "%"
-                                    : root.batteryPercentage + "%"
+                                    root.batteryPercentage +
+                                    "%"
+                                    : root.batteryPercentage +
+                                    "%"
                                 )
 
                                 color: root.batteryColor
-                                font.family: "JetBrainsMono Nerd Font"
+
+                                font.family:
+                                "JetBrainsMono Nerd Font"
+
                                 font.pixelSize: 8
                                 font.bold: true
                             }
                         }
 
+                        // VOLUME TEXT
                         Text {
                             width: 32
                             height: parent.height
-                            verticalAlignment: Text.AlignVCenter
+
+                            verticalAlignment:
+                            Text.AlignVCenter
 
                             text:
                             root.isMuted
                             ? "MUT"
-                            : Math.round(root.volumeLevel * 100) + "%"
+                            : Math.round(
+                                root.volumeLevel * 100
+                            ) + "%"
 
                             color:
                             root.isMuted
                             ? root.colAccent
                             : root.colFgBright
 
-                            font.family: "JetBrainsMono Nerd Font"
+                            font.family:
+                            "JetBrainsMono Nerd Font"
+
                             font.pixelSize: 8
                             font.bold: true
                         }
 
+                        // VOLUME BAR
                         Item {
                             id: volTrack
+
                             width: 145
                             height: 14
-                            anchors.verticalCenter: parent.verticalCenter
+
+                            anchors.verticalCenter:
+                            parent.verticalCenter
 
                             readonly property int stepCount: 10
+
                             readonly property var stepColors: [
                                 root.colViolet,
                                 root.colViolet,
@@ -1129,7 +1352,8 @@ Item {
                                 anchors.fill: parent
 
                                 Repeater {
-                                    model: volTrack.stepCount
+                                    model:
+                                    volTrack.stepCount
 
                                     Rectangle {
                                         required property int index
@@ -1137,13 +1361,17 @@ Item {
                                         width:
                                         volTrack.width /
                                         volTrack.stepCount
-                                        height: volTrack.height
+
+                                        height:
+                                        volTrack.height
 
                                         property bool isActive:
                                         !root.isMuted &&
                                         root.volumeLevel >=
-                                        ((index + 1) /
-                                        volTrack.stepCount)
+                                        (
+                                            (index + 1) /
+                                            volTrack.stepCount
+                                        )
 
                                         color:
                                         isActive
@@ -1157,9 +1385,13 @@ Item {
                                 anchors.fill: parent
 
                                 function updateVol(mouse) {
-                                    const value = Math.max(
+                                    const value =
+                                    Math.max(
                                         0,
-                                        Math.min(1, mouse.x / width)
+                                        Math.min(
+                                            1,
+                                            mouse.x / width
+                                        )
                                     )
 
                                     root.volumeLevel = value
@@ -1167,35 +1399,50 @@ Item {
                                     root.setVolume(value)
                                 }
 
-                                onPressed: mouse => updateVol(mouse)
+                                onPressed:
+                                mouse => updateVol(mouse)
 
-                                onPositionChanged: mouse => {
+                                onPositionChanged:
+                                mouse => {
                                     if (pressed)
                                         updateVol(mouse)
                                 }
                             }
                         }
 
+                        // MUTE
                         Rectangle {
                             width: 46
                             height: 28
-                            color: muteHover.hovered
+
+                            color:
+                            muteHover.hovered
                             ? root.colSelBg
                             : root.colNavy
 
                             Text {
                                 anchors.centerIn: parent
-                                text: root.isMuted ? "UNM" : "MUTE"
+
+                                text:
+                                root.isMuted
+                                ? "UNM"
+                                : "MUTE"
+
                                 color:
                                 root.isMuted
                                 ? root.colAccent
                                 : root.colFg
-                                font.family: "JetBrainsMono Nerd Font"
+
+                                font.family:
+                                "JetBrainsMono Nerd Font"
+
                                 font.pixelSize: 7
                                 font.bold: true
                             }
 
-                            HoverHandler { id: muteHover }
+                            HoverHandler {
+                                id: muteHover
+                            }
 
                             TapHandler {
                                 onTapped: {
@@ -1216,15 +1463,21 @@ Item {
 
                     anchors.top: parent.top
                     anchors.topMargin: root.panelHeight
+
                     anchors.left: parent.left
                     anchors.leftMargin: root.borderWidth
+
                     anchors.right: parent.right
                     anchors.rightMargin: root.borderWidth
+
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: root.borderWidth
 
                     clip: true
-                    visible: root.currentExpandedHeight > 0
+
+                    visible:
+                    root.currentExpandedHeight > 0
+
                     color: root.colNavy
 
                     // ====================================================
@@ -1233,7 +1486,9 @@ Item {
 
                     Item {
                         anchors.fill: parent
-                        visible: root.activeMenu === "wifi"
+
+                        visible:
+                        root.activeMenu === "wifi"
 
                         Item {
                             id: wifiHeader
@@ -1241,15 +1496,21 @@ Item {
                             anchors.top: parent.top
                             anchors.left: parent.left
                             anchors.right: parent.right
+
                             height: 36
 
                             Text {
                                 anchors.left: parent.left
                                 anchors.leftMargin: 12
-                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.verticalCenter:
+                                parent.verticalCenter
+
                                 text: "WI-FI NETWORKS"
                                 color: root.colFgBright
-                                font.family: "JetBrainsMono Nerd Font"
+
+                                font.family:
+                                "JetBrainsMono Nerd Font"
+
                                 font.pixelSize: 9
                                 font.bold: true
                             }
@@ -1257,55 +1518,76 @@ Item {
                             Row {
                                 anchors.right: parent.right
                                 anchors.rightMargin: 12
-                                anchors.verticalCenter: parent.verticalCenter
+
+                                anchors.verticalCenter:
+                                parent.verticalCenter
+
                                 spacing: 6
 
                                 Rectangle {
                                     width: 70
                                     height: 22
-                                    color: wifiPwrHover.hovered
+
+                                    color:
+                                    wifiPwrHover.hovered
                                     ? root.colSelBg
                                     : root.colBg
 
                                     Text {
                                         anchors.centerIn: parent
+
                                         text:
                                         root.wifiState === "enabled"
                                         ? "TURN OFF"
                                         : "TURN ON"
+
                                         color:
                                         root.wifiState === "enabled"
                                         ? root.colAccent
                                         : root.colFgBright
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 8
                                         font.bold: true
                                     }
 
-                                    HoverHandler { id: wifiPwrHover }
+                                    HoverHandler {
+                                        id: wifiPwrHover
+                                    }
 
                                     TapHandler {
-                                        onTapped: root.toggleWifi()
+                                        onTapped:
+                                        root.toggleWifi()
                                     }
                                 }
 
                                 Rectangle {
                                     width: 60
                                     height: 22
-                                    color: wifiScanHover.hovered
+
+                                    color:
+                                    wifiScanHover.hovered
                                     ? root.colSelBg
                                     : root.colBg
 
                                     Text {
                                         anchors.centerIn: parent
+
                                         text: "SCAN"
                                         color: root.colFgBright
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 8
                                         font.bold: true
                                     }
 
-                                    HoverHandler { id: wifiScanHover }
+                                    HoverHandler {
+                                        id: wifiScanHover
+                                    }
 
                                     TapHandler {
                                         onTapped: {
@@ -1318,10 +1600,13 @@ Item {
                         }
 
                         ListView {
-                            anchors.top: wifiHeader.bottom
+                            anchors.top:
+                            wifiHeader.bottom
+
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
+
                             anchors.margins: 6
 
                             clip: true
@@ -1334,7 +1619,9 @@ Item {
                                 required property string security
                                 required property bool active
 
-                                width: ListView.view.width
+                                width:
+                                ListView.view.width
+
                                 height: 32
 
                                 color:
@@ -1347,22 +1634,33 @@ Item {
                                 Row {
                                     anchors.left: parent.left
                                     anchors.leftMargin: 10
-                                    anchors.verticalCenter: parent.verticalCenter
+
+                                    anchors.verticalCenter:
+                                    parent.verticalCenter
+
                                     spacing: 8
 
                                     Text {
-                                        text: active ? "●" : "○"
+                                        text:
+                                        active
+                                        ? "●"
+                                        : "○"
+
                                         color:
                                         active
                                         ? root.colAccent
                                         : root.colFg
+
                                         font.pixelSize: 8
                                     }
 
                                     Text {
                                         text: ssid
                                         color: root.colFgBright
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 8
                                         font.bold: active
                                     }
@@ -1371,28 +1669,40 @@ Item {
                                 Row {
                                     anchors.right: parent.right
                                     anchors.rightMargin: 10
-                                    anchors.verticalCenter: parent.verticalCenter
+
+                                    anchors.verticalCenter:
+                                    parent.verticalCenter
+
                                     spacing: 10
 
                                     Text {
                                         text: security
                                         color: root.colFg
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 7
                                     }
 
                                     Text {
                                         text: signal
                                         color: root.colFgBright
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 8
                                     }
                                 }
 
-                                HoverHandler { id: wifiItemHover }
+                                HoverHandler {
+                                    id: wifiItemHover
+                                }
 
                                 TapHandler {
-                                    onTapped: root.connectWifi(ssid)
+                                    onTapped:
+                                    root.connectWifi(ssid)
                                 }
                             }
                         }
@@ -1404,7 +1714,9 @@ Item {
 
                     Item {
                         anchors.fill: parent
-                        visible: root.activeMenu === "bt"
+
+                        visible:
+                        root.activeMenu === "bt"
 
                         Item {
                             id: btHeader
@@ -1412,15 +1724,24 @@ Item {
                             anchors.top: parent.top
                             anchors.left: parent.left
                             anchors.right: parent.right
+
                             height: 36
 
                             Text {
                                 anchors.left: parent.left
                                 anchors.leftMargin: 12
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: "BLUETOOTH DEVICES"
+
+                                anchors.verticalCenter:
+                                parent.verticalCenter
+
+                                text:
+                                "BLUETOOTH DEVICES"
+
                                 color: root.colFgBright
-                                font.family: "JetBrainsMono Nerd Font"
+
+                                font.family:
+                                "JetBrainsMono Nerd Font"
+
                                 font.pixelSize: 9
                                 font.bold: true
                             }
@@ -1428,58 +1749,80 @@ Item {
                             Row {
                                 anchors.right: parent.right
                                 anchors.rightMargin: 12
-                                anchors.verticalCenter: parent.verticalCenter
+
+                                anchors.verticalCenter:
+                                parent.verticalCenter
+
                                 spacing: 6
 
                                 Rectangle {
                                     width: 70
                                     height: 22
-                                    color: btPwrHover.hovered
+
+                                    color:
+                                    btPwrHover.hovered
                                     ? root.colSelBg
                                     : root.colBg
 
                                     Text {
                                         anchors.centerIn: parent
+
                                         text:
                                         root.bluetoothEnabled
                                         ? "TURN OFF"
                                         : "TURN ON"
+
                                         color:
                                         root.bluetoothEnabled
                                         ? root.colAccent
                                         : root.colFgBright
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 8
                                         font.bold: true
                                     }
 
-                                    HoverHandler { id: btPwrHover }
+                                    HoverHandler {
+                                        id: btPwrHover
+                                    }
 
                                     TapHandler {
-                                        onTapped: root.toggleBluetooth()
+                                        onTapped:
+                                        root.toggleBluetooth()
                                     }
                                 }
 
                                 Rectangle {
                                     width: 70
                                     height: 22
-                                    color: btScanHover.hovered
+
+                                    color:
+                                    btScanHover.hovered
                                     ? root.colSelBg
                                     : root.colBg
 
                                     Text {
                                         anchors.centerIn: parent
+
                                         text:
                                         root.bluetoothScanning
                                         ? "SCANNING"
                                         : "SCAN"
+
                                         color: root.colFgBright
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 8
                                         font.bold: true
                                     }
 
-                                    HoverHandler { id: btScanHover }
+                                    HoverHandler {
+                                        id: btScanHover
+                                    }
 
                                     TapHandler {
                                         onTapped: {
@@ -1494,16 +1837,22 @@ Item {
                         Flickable {
                             id: btFlick
 
-                            anchors.top: btHeader.bottom
+                            anchors.top:
+                            btHeader.bottom
+
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
+
                             anchors.margins: 6
 
                             clip: true
+
                             contentWidth: width
                             contentHeight: btContent.height
-                            boundsBehavior: Flickable.StopAtBounds
+
+                            boundsBehavior:
+                            Flickable.StopAtBounds
 
                             Column {
                                 id: btContent
@@ -1514,15 +1863,22 @@ Item {
                                 Rectangle {
                                     width: parent.width
                                     height: 26
+
                                     color: root.colPurple
 
                                     Text {
                                         anchors.left: parent.left
                                         anchors.leftMargin: 8
-                                        anchors.verticalCenter: parent.verticalCenter
+
+                                        anchors.verticalCenter:
+                                        parent.verticalCenter
+
                                         text: "PAIRED DEVICES"
                                         color: root.colFgBright
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 8
                                         font.bold: true
                                     }
@@ -1549,42 +1905,61 @@ Item {
                                         Row {
                                             anchors.left: parent.left
                                             anchors.leftMargin: 10
-                                            anchors.verticalCenter: parent.verticalCenter
+
+                                            anchors.verticalCenter:
+                                            parent.verticalCenter
+
                                             spacing: 8
 
                                             Text {
                                                 width: 10
+
                                                 horizontalAlignment:
                                                 Text.AlignHCenter
-                                                text: connected ? "●" : "◆"
+
+                                                text:
+                                                connected
+                                                ? "●"
+                                                : "◆"
+
                                                 color:
                                                 connected
                                                 ? root.colAccent
                                                 : root.colPink
+
                                                 font.pixelSize: 8
                                             }
 
                                             Column {
                                                 anchors.verticalCenter:
                                                 parent.verticalCenter
+
                                                 spacing: 1
 
                                                 Text {
                                                     width: 390
+
                                                     text: name
-                                                    color: root.colFgBright
+                                                    color:
+                                                    root.colFgBright
+
                                                     font.family:
                                                     "JetBrainsMono Nerd Font"
+
                                                     font.pixelSize: 8
                                                     font.bold: true
-                                                    elide: Text.ElideRight
+
+                                                    elide:
+                                                    Text.ElideRight
                                                 }
 
                                                 Text {
                                                     text: mac
                                                     color: root.colFg
+
                                                     font.family:
                                                     "JetBrainsMono Nerd Font"
+
                                                     font.pixelSize: 6
                                                 }
                                             }
@@ -1593,10 +1968,15 @@ Item {
                                         Rectangle {
                                             anchors.right: parent.right
                                             anchors.rightMargin: 10
+
                                             anchors.verticalCenter:
                                             parent.verticalCenter
 
-                                            width: connected ? 82 : 72
+                                            width:
+                                            connected
+                                            ? 82
+                                            : 72
+
                                             height: 20
 
                                             color:
@@ -1606,16 +1986,20 @@ Item {
 
                                             Text {
                                                 anchors.centerIn: parent
+
                                                 text:
                                                 connected
                                                 ? "DISCONNECT"
                                                 : "CONNECT"
+
                                                 color:
                                                 connected
                                                 ? root.colPink
                                                 : root.colFgBright
+
                                                 font.family:
                                                 "JetBrainsMono Nerd Font"
+
                                                 font.pixelSize: 7
                                                 font.bold: true
                                             }
@@ -1633,24 +2017,36 @@ Item {
                                             }
                                         }
 
-                                        HoverHandler { id: pairedHover }
+                                        HoverHandler {
+                                            id: pairedHover
+                                        }
                                     }
                                 }
 
                                 Rectangle {
-                                    visible: btPairedModel.count === 0
+                                    visible:
+                                    btPairedModel.count === 0
+
                                     width: parent.width
                                     height: 28
+
                                     color: root.colBg
 
                                     Text {
                                         anchors.left: parent.left
                                         anchors.leftMargin: 10
+
                                         anchors.verticalCenter:
                                         parent.verticalCenter
-                                        text: "No paired devices"
+
+                                        text:
+                                        "No paired devices"
+
                                         color: root.colFg
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 7
                                     }
                                 }
@@ -1658,16 +2054,24 @@ Item {
                                 Rectangle {
                                     width: parent.width
                                     height: 26
+
                                     color: root.colPurple
 
                                     Text {
                                         anchors.left: parent.left
                                         anchors.leftMargin: 8
+
                                         anchors.verticalCenter:
                                         parent.verticalCenter
-                                        text: "NEARBY UNPAIRED"
+
+                                        text:
+                                        "NEARBY UNPAIRED"
+
                                         color: root.colFgBright
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 8
                                         font.bold: true
                                     }
@@ -1682,6 +2086,7 @@ Item {
 
                                         width: btContent.width
                                         height: 32
+
                                         color:
                                         nearbyHover.hovered
                                         ? root.colSelBg
@@ -1690,39 +2095,53 @@ Item {
                                         Row {
                                             anchors.left: parent.left
                                             anchors.leftMargin: 10
+
                                             anchors.verticalCenter:
                                             parent.verticalCenter
+
                                             spacing: 8
 
                                             Text {
                                                 width: 10
+
                                                 horizontalAlignment:
                                                 Text.AlignHCenter
+
                                                 text: "○"
                                                 color: root.colFg
+
                                                 font.pixelSize: 8
                                             }
 
                                             Column {
                                                 anchors.verticalCenter:
                                                 parent.verticalCenter
+
                                                 spacing: 1
 
                                                 Text {
                                                     width: 390
+
                                                     text: name
-                                                    color: root.colFgBright
+                                                    color:
+                                                    root.colFgBright
+
                                                     font.family:
                                                     "JetBrainsMono Nerd Font"
+
                                                     font.pixelSize: 8
-                                                    elide: Text.ElideRight
+
+                                                    elide:
+                                                    Text.ElideRight
                                                 }
 
                                                 Text {
                                                     text: mac
                                                     color: root.colFg
+
                                                     font.family:
                                                     "JetBrainsMono Nerd Font"
+
                                                     font.pixelSize: 6
                                                 }
                                             }
@@ -1731,8 +2150,10 @@ Item {
                                         Rectangle {
                                             anchors.right: parent.right
                                             anchors.rightMargin: 10
+
                                             anchors.verticalCenter:
                                             parent.verticalCenter
+
                                             width: 52
                                             height: 20
 
@@ -1743,10 +2164,13 @@ Item {
 
                                             Text {
                                                 anchors.centerIn: parent
+
                                                 text: "PAIR"
                                                 color: root.colAccent
+
                                                 font.family:
                                                 "JetBrainsMono Nerd Font"
+
                                                 font.pixelSize: 7
                                                 font.bold: true
                                             }
@@ -1761,19 +2185,25 @@ Item {
                                             }
                                         }
 
-                                        HoverHandler { id: nearbyHover }
+                                        HoverHandler {
+                                            id: nearbyHover
+                                        }
                                     }
                                 }
 
                                 Rectangle {
-                                    visible: btNearbyModel.count === 0
+                                    visible:
+                                    btNearbyModel.count === 0
+
                                     width: parent.width
                                     height: 28
+
                                     color: root.colBg
 
                                     Text {
                                         anchors.left: parent.left
                                         anchors.leftMargin: 10
+
                                         anchors.verticalCenter:
                                         parent.verticalCenter
 
@@ -1783,7 +2213,10 @@ Item {
                                         : "Press SCAN to find devices"
 
                                         color: root.colFg
-                                        font.family: "JetBrainsMono Nerd Font"
+
+                                        font.family:
+                                        "JetBrainsMono Nerd Font"
+
                                         font.pixelSize: 7
                                     }
                                 }
