@@ -610,14 +610,14 @@ class Installer:
             return
 
         self.say("pulling latest dotfiles")
-        self.run(["git", "-C", str(self.dotfiles), "pull", "--ff-only"])
+        self.run_command(["git", "-C", str(self.dotfiles), "pull", "--ff-only"])
         self.success("dotfiles repository updated")
 
     # --------------------------------------------------------
     # Command execution
     # --------------------------------------------------------
 
-    def run(
+    def run_command(
         self,
         argv: list[str],
         *,
@@ -847,7 +847,7 @@ class Installer:
 
         self.step(f"installing {len(valid)} official packages")
 
-        self.run(
+        self.run_command(
             [
                 "pacman",
                 "-Syu",
@@ -875,7 +875,7 @@ class Installer:
 
         temp = Path(tempfile.mkdtemp(prefix="alice-yay-"))
         try:
-            self.run(
+            self.run_command(
                 [
                     "git",
                     "clone",
@@ -884,7 +884,7 @@ class Installer:
                 ]
             )
 
-            self.run(
+            self.run_command(
                 ["makepkg", "-si", "--noconfirm"],
                 cwd=temp / "yay",
             )
@@ -923,7 +923,7 @@ class Installer:
 
         self.step(f"installing {len(package_list)} AUR packages with {helper}")
 
-        self.run(
+        self.run_command(
             [
                 helper,
                 "-S",
@@ -1367,15 +1367,15 @@ user = "greeter"
         temp = Path(tempfile.mkstemp(prefix="greetd-", suffix=".toml")[1])
         try:
             temp.write_text(config, encoding="utf-8")
-            self.run(
+            self.run_command(
                 ["install", "-d", "-m", "0755", "/etc/greetd"],
                 sudo=True,
             )
-            self.run(
+            self.run_command(
                 ["install", "-m", "0644", str(temp), str(config_path)],
                 sudo=True,
             )
-            self.run(
+            self.run_command(
                 ["systemctl", "enable", "greetd.service"],
                 sudo=True,
             )
@@ -1408,7 +1408,7 @@ user = "greeter"
                 continue
 
             self.say(f"enabling {service}")
-            self.run(
+            self.run_command(
                 ["systemctl", "enable", service],
                 sudo=True,
             )
@@ -1634,7 +1634,7 @@ user = "greeter"
             self.logger.write()
             if self.ask("reboot now?", default=False):
                 self.say("rebooting")
-                self.run(["systemctl", "reboot"], sudo=True)
+                self.run_command(["systemctl", "reboot"], sudo=True)
 
     def do_configs_only(self) -> None:
         self.args.fresh = False
