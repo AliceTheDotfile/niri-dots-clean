@@ -1,58 +1,69 @@
+
 #!/usr/bin/env bash
 #
 # Alice's Niri dotfiles installer
 #
 # Usage:
 #   ./install.sh
+#   ./install.sh --fresh
+#   ./install.sh --minimal
+#   ./install.sh --update
+#   ./install.sh --configs-only
+#   ./install.sh --packages-only
 #   ./install.sh --dry-run
 #   ./install.sh --no-deps
-#   ./install.sh --minimal
-#   ./install.sh --fresh
 #   ./install.sh --no-tui
 #
-# Modes:
+# ============================================================
+# IMPORTANT
+# ============================================================
 #
-#   Full setup
-#       Normal install for an existing Arch system.
+# WAYBAR:
+#   NEVER installed
+#   NEVER copied
+#   NEVER backed up
+#   NEVER verified
 #
-#   Fresh Arch setup
-#       Intended for a basically-empty Arch install.
-#       Installs:
-#         - Niri
-#         - Quickshell
-#         - Kate
-#         - AliceNight theme
-#         - Wallfliper
-#         - useful desktop apps
-#         - greetd
-#         - greetd-tuigreet
-#         - NetworkManager
-#         - Bluetooth
-#       Configures greetd to launch niri-session.
+# FASTFETCH:
+#   Application may be installed.
+#   ~/.config/fastfetch is NEVER touched.
 #
-# IMPORTANT:
+# KATE:
+#   Reusable configuration is installed:
+#       ~/.config/kate
+#       ~/.config/katerc
+#       ~/.config/katevirc
+#       ~/.config/katemetainfos
 #
-#   WAYBAR:
-#       NEVER installed.
-#       NEVER copied.
-#       NEVER backed up.
-#       NEVER verified.
+#   Kate session files are NOT installed.
 #
-#   FASTFETCH:
-#       Fastfetch may be installed as an application.
-#       ~/.config/fastfetch is NEVER touched.
+# PATH:
+#   ~/.local/bin is added only when it is not already in PATH.
 #
-#   KATE:
-#       Reusable Kate configuration is installed:
-#         ~/.config/kate
-#         ~/.config/katerc
-#         ~/.config/katevirc
-#         ~/.config/katemetainfos
+# BACKUPS:
+#   Existing files are moved to:
+#       ~/.dotfiles-backup/<timestamp>/
 #
-#       Kate session files are NEVER copied.
+# UPDATE:
+#   Pulls the latest changes from the current git repository
+#   and reapplies the rice/configuration to the existing system.
 #
-#   Existing files are backed up before replacement.
+#   Local changes in the dotfiles repository are never overwritten.
 #
+# FRESH MODE:
+#   Intended for a bare Arch installation.
+#   Installs/configures:
+#       Niri
+#       Quickshell
+#       Kate
+#       Wallfliper
+#       useful applications
+#       greetd
+#       greetd-tuigreet
+#       NetworkManager
+#       Bluetooth
+#
+# ============================================================
 
 set -Eeuo pipefail
 
@@ -79,6 +90,10 @@ DRY=0
 MINIMAL=0
 FRESH=0
 NO_TUI=0
+MODE=""
+
+# Used by the TUI.
+MENU_RESULT=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -92,10 +107,24 @@ for arg in "$@"; do
 
         --minimal)
             MINIMAL=1
+            MODE="minimal"
             ;;
 
         --fresh)
             FRESH=1
+            MODE="fresh"
+            ;;
+
+        --update)
+            MODE="update"
+            ;;
+
+        --configs-only)
+            MODE="configs"
+            ;;
+
+        --packages-only)
+            MODE="packages"
             ;;
 
         --no-tui)
@@ -108,31 +137,48 @@ Alice's Niri dotfiles installer
 
 Usage:
   ./install.sh
-      Open the installer menu.
+      Open installer menu.
 
   ./install.sh --fresh
-      Fresh Arch bootstrap:
-      Niri + Quickshell + Kate + apps + Wallfliper +
-      greetd + tuigreet + NetworkManager + Bluetooth.
+      Fresh Arch bootstrap.
+      Installs the full desktop + greetd + tuigreet.
 
   ./install.sh --minimal
-      Install the core Niri setup.
+      Install the core Niri environment.
+
+  ./install.sh --update
+      Pull the newest dotfiles from git and update the
+      existing rice/configuration.
+
+  ./install.sh --configs-only
+      Install dotfiles without packages.
+
+  ./install.sh --packages-only
+      Install packages without copying configs.
 
   ./install.sh --no-deps
-      Skip package installation.
+      Skip all package installation.
 
   ./install.sh --dry-run
-      Show what would happen without changing anything.
+      Show actions without modifying the system.
 
   ./install.sh --no-tui
-      Run the full setup without the menu.
+      Run a normal full installation without the menu.
 
 The installer NEVER touches:
   ~/.config/waybar
   ~/.config/fastfetch
 
+The installer NEVER installs:
+  Waybar
+
 The installer NEVER copies:
   ~/.local/share/kate/anonymous.katesession
+
+Update mode:
+  The dotfiles repository must be a clean git working tree.
+  Updates use:
+      git pull --ff-only
 EOF
             exit 0
             ;;
@@ -162,7 +208,7 @@ WHITE='\033[97m'
 GRAY='\033[90m'
 
 # ============================================================
-# Output
+# Output helpers
 # ============================================================
 
 clear_screen() {
@@ -213,7 +259,6 @@ cleanup() {
 }
 
 trap cleanup EXIT
-
 trap 'fail "installer failed on line $LINENO"; exit 1' ERR
 
 # ============================================================
@@ -236,8 +281,8 @@ menu() {
 
     local options=("$@")
     local selected=0
-    local key
-    local rest
+    local key=""
+    local rest=""
 
     while true; do
         draw_header
@@ -259,11 +304,13 @@ menu() {
 
         case "$key" in
             "")
-                return "$selected"
+                MENU_RESULT="$selected"
+                return 0
                 ;;
 
             q|Q)
-                return 255
+                MENU_RESULT=-1
+                return 0
                 ;;
 
             j)
@@ -303,22 +350,18 @@ menu() {
 # Package lists
 # ============================================================
 
-# ------------------------------------------------------------
-# Core desktop
-# ------------------------------------------------------------
-
 CORE_PKGS=(
-    # Wayland / Niri
+    # Niri
     niri
     xwayland-satellite
 
-    # Desktop shell
+    # Shell / terminal
     quickshell
     kitty
     swaync
     wofi
 
-    # KDE / theme support
+    # KDE / themes
     kate
     qt6ct
     nwg-look
@@ -329,8 +372,8 @@ CORE_PKGS=(
 
     # Wallpaper
     awww
-    ffmpeg
     mpv
+    ffmpeg
     pyside6
 
     # Audio
@@ -361,7 +404,7 @@ CORE_PKGS=(
     bluez-utils
     blueman
 
-    # General tools
+    # General utilities
     python
     jq
     rsync
@@ -375,25 +418,21 @@ CORE_PKGS=(
     woff2-font-awesome
 )
 
-# ------------------------------------------------------------
-# Nice everyday applications
-# ------------------------------------------------------------
-
 NICE_PKGS=(
     # Browser
     firefox
 
-    # File manager
+    # File management
     thunar
     file-roller
     7zip
     unzip
     zip
 
-    # Image / media
+    # Image viewer
     imv
 
-    # Editor / development
+    # Development
     neovim
     fzf
     ripgrep
@@ -411,18 +450,10 @@ NICE_PKGS=(
     man-pages
 )
 
-# ------------------------------------------------------------
-# Packages only needed for a fresh system
-# ------------------------------------------------------------
-
 FRESH_PKGS=(
     greetd
     greetd-tuigreet
 )
-
-# ------------------------------------------------------------
-# AUR
-# ------------------------------------------------------------
 
 AUR_PKGS=(
     mpvpaper
@@ -430,15 +461,27 @@ AUR_PKGS=(
 )
 
 # ============================================================
-# Basic command helpers
+# Basic helpers
 # ============================================================
 
 need_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
+require_arch() {
+    need_command pacman || {
+        fail "this installer requires Arch Linux / an Arch-based system with pacman"
+        exit 1
+    }
+
+    [[ $EUID -ne 0 ]] || {
+        fail "do not run this installer as root"
+        exit 1
+    }
+}
+
 # ============================================================
-# Repo validation
+# Repository validation
 # ============================================================
 
 validate_repo() {
@@ -452,21 +495,84 @@ validate_repo() {
         "$DOTFILES/Wallpapers"
     )
 
-    local missing=0
+    local optional=(
+        "$DOTFILES/home/.config/kate"
+        "$DOTFILES/home/.config/katerc"
+        "$DOTFILES/home/.config/katevirc"
+        "$DOTFILES/home/.config/katemetainfos"
+    )
+
     local path
+    local missing=0
 
     for path in "${required[@]}"; do
         if [[ ! -e "$path" ]]; then
-            warn "missing: ${path#$DOTFILES/}"
+            warn "missing required repo path: ${path#$DOTFILES/}"
             missing=1
         fi
     done
 
+    for path in "${optional[@]}"; do
+        if [[ ! -e "$path" ]]; then
+            warn "Kate config not present in repo: ${path#$DOTFILES/}"
+        fi
+    done
+
     if (( missing )); then
-        warn "some expected files are missing"
-    else
-        success "repository looks good"
+        fail "repository is missing required files"
+        exit 1
     fi
+
+    success "repository looks good"
+}
+
+# ============================================================
+# Git update
+# ============================================================
+
+update_repo() {
+    need_command git || {
+        fail "git is required for update mode"
+        return 1
+    }
+
+    [[ -d "$DOTFILES/.git" ]] || {
+        fail "this installer is not running from a git repository"
+        fail "clone the dotfiles repo first, then run ./install.sh --update"
+        return 1
+    }
+
+    say "checking dotfiles git repository"
+
+    local status
+    status="$(git -C "$DOTFILES" status --porcelain)"
+
+    if [[ -n "$status" ]]; then
+        fail "the dotfiles repository has uncommitted changes"
+        printf "\n${GRAY}%s${RESET}\n\n" "$status"
+        warn "update stopped so your local repo changes are not overwritten"
+        return 1
+    fi
+
+    local branch
+    branch="$(git -C "$DOTFILES" branch --show-current)"
+
+    if [[ -n "$branch" ]]; then
+        info "branch: $branch"
+    else
+        warn "repository is in detached HEAD state"
+    fi
+
+    if (( DRY )); then
+        info "[dry] would run: git pull --ff-only"
+        return 0
+    fi
+
+    say "pulling latest dotfiles"
+
+    git -C "$DOTFILES" pull --ff-only
+
+    success "dotfiles repository updated"
 }
 
 # ============================================================
@@ -507,7 +613,7 @@ install_yay() {
     tmp="$(mktemp -d)"
 
     if (( DRY )); then
-        info "[dry] would build yay"
+        info "[dry] would clone and build yay"
         rm -rf "$tmp"
         return 0
     fi
@@ -527,7 +633,7 @@ install_yay() {
 }
 
 # ============================================================
-# Packages
+# Package installation
 # ============================================================
 
 official_package_exists() {
@@ -543,7 +649,7 @@ install_official_packages() {
         if official_package_exists "$pkg"; then
             valid+=("$pkg")
         else
-            warn "not found in official Arch repos: $pkg"
+            warn "not found in Arch repositories: $pkg"
         fi
     done
 
@@ -553,8 +659,10 @@ install_official_packages() {
 
     say "installing ${#valid[@]} official packages"
 
-    # Always sync the complete package database first.
-    run sudo pacman -Syu --needed --noconfirm \
+    run sudo pacman \
+        -Syu \
+        --needed \
+        --noconfirm \
         "${valid[@]}"
 
     success "official packages installed"
@@ -578,8 +686,8 @@ install_aur_packages() {
         fi
 
         printf "\n"
-        printf "${YELLOW}a few packages come from the AUR.${RESET}\n"
-        printf "${GRAY}they are not required for the basic Niri session.${RESET}\n\n"
+        printf "${YELLOW}some packages are from the AUR.${RESET}\n"
+        printf "${GRAY}The installer can bootstrap yay automatically.${RESET}\n\n"
 
         read -rp "install yay automatically? [Y/n] " answer
         answer="${answer:-Y}"
@@ -595,24 +703,21 @@ install_aur_packages() {
 
     say "installing AUR packages with $helper"
 
-    run "$helper" -S --needed --noconfirm \
+    run "$helper" \
+        -S \
+        --needed \
+        --noconfirm \
         "${packages[@]}"
 
     success "AUR packages installed"
 }
 
 install_deps() {
-    need_command pacman || {
-        fail "this installer requires Arch Linux with pacman"
-        return 1
-    }
+    require_arch
 
-    [[ $EUID -ne 0 ]] || {
-        fail "do not run this installer as root"
-        return 1
-    }
-
-    local packages=("${CORE_PKGS[@]}")
+    local packages=(
+        "${CORE_PKGS[@]}"
+    )
 
     if (( ! MINIMAL )); then
         packages+=("${NICE_PKGS[@]}")
@@ -627,24 +732,28 @@ install_deps() {
 }
 
 # ============================================================
-# Backups
+# Backup handling
 # ============================================================
 
 backup_destination() {
     local dest="$1"
 
-    if [[ -e "$dest" || -L "$dest" ]]; then
-        run mkdir -p \
-            "$BACKUP/$(dirname "${dest#$HOME/}")"
-
-        run mv \
-            "$dest" \
-            "$BACKUP/${dest#$HOME/}"
+    if [[ ! -e "$dest" && ! -L "$dest" ]]; then
+        return 0
     fi
+
+    local relative="${dest#$HOME/}"
+
+    run mkdir -p \
+        "$BACKUP/$(dirname "$relative")"
+
+    run mv \
+        "$dest" \
+        "$BACKUP/$relative"
 }
 
 # ============================================================
-# @HOME@ substitution
+# @HOME@ replacement
 # ============================================================
 
 replace_home_token() {
@@ -659,34 +768,38 @@ replace_home_token() {
 }
 
 # ============================================================
-# Place files
+# Install file / directory
 # ============================================================
 
 place() {
     local src="$1"
     local dest="$2"
 
-    [[ -e "$src" || -L "$src" ]] || {
+    if [[ ! -e "$src" && ! -L "$src" ]]; then
         warn "missing in repo: ${src#$DOTFILES/}"
         return 0
-    }
+    fi
 
     if [[ -e "$dest" || -L "$dest" ]]; then
         say "backing up ${dest#$HOME/}"
         backup_destination "$dest"
     fi
 
-    run mkdir -p "$(dirname "$dest")"
+    run mkdir -p \
+        "$(dirname "$dest")"
 
     if [[ -d "$src" && ! -L "$src" ]]; then
         run mkdir -p "$dest"
 
-        run rsync -a \
+        run rsync \
+            -a \
             --exclude=.git \
             "$src/" \
             "$dest/"
     else
-        run cp -a "$src" "$dest"
+        run cp -a \
+            "$src" \
+            "$dest"
     fi
 
     replace_home_token "$dest"
@@ -704,13 +817,6 @@ install_configs() {
         "$BIN" \
         "$SHARE" \
         "$HOME/Wallpapers"
-
-    # ========================================================
-    # ONLY THESE ~/.config directories are managed.
-    #
-    # Waybar is NOT here.
-    # Fastfetch is NOT here.
-    # ========================================================
 
     local configs=(
         alice-rice
@@ -735,14 +841,12 @@ install_configs() {
             "$CONFIG/$name"
     done
 
-    # Quickshell
     place \
         "$DOTFILES/quickshell/my-shell" \
         "$CONFIG/quickshell/my-shell"
 
     success "desktop configs installed"
 
-    # Explicit protection notices.
     info "Fastfetch config untouched"
     info "Waybar config untouched"
 }
@@ -755,35 +859,19 @@ install_home_files() {
     say "installing shell, Kate and theme files"
 
     local home_items=(
-        # Shell
         ".bashrc"
         ".bash_profile"
 
-        # KDE global settings
         ".config/kdeglobals"
-
-        # ----------------------------------------------------
-        # Kate
-        #
-        # Your reusable Kate configuration.
-        #
-        # We deliberately do NOT install:
-        #
-        #   ~/.local/share/kate/anonymous.katesession
-        #
-        # because that is session state.
-        # ----------------------------------------------------
 
         ".config/kate"
         ".config/katerc"
         ".config/katevirc"
         ".config/katemetainfos"
 
-        # AliceNight
         ".local/share/color-schemes/AliceNight.colors"
         ".local/share/themes/AliceNight"
 
-        # Cursor
         ".icons/Bibata-Material-Cloud"
     )
 
@@ -796,6 +884,8 @@ install_home_files() {
     done
 
     success "shell, Kate and theme files installed"
+
+    info "Kate session files are not installed"
 }
 
 # ============================================================
@@ -815,10 +905,9 @@ install_wallfliper() {
 
     local launcher="$BIN/wallfliper"
 
-    # If the repo has no launcher, create one.
     if [[ ! -e "$DOTFILES/local/bin/wallfliper" ]]; then
-
         if [[ -e "$launcher" ]]; then
+            say "backing up existing Wallfliper launcher"
             backup_destination "$launcher"
         fi
 
@@ -864,7 +953,7 @@ install_scripts() {
 
     shopt -u nullglob
 
-    success "scripts installed"
+    success "local scripts installed"
 }
 
 # ============================================================
@@ -884,13 +973,14 @@ install_wallpapers() {
 
         target="$HOME/Wallpapers/$(basename "$file")"
 
-        # Never overwrite existing user wallpapers.
         if [[ -e "$target" ]]; then
             info "keeping existing wallpaper: $(basename "$file")"
             continue
         fi
 
-        run cp -a "$file" "$target"
+        run cp -a \
+            "$file" \
+            "$target"
     done
 
     shopt -u nullglob
@@ -899,7 +989,7 @@ install_wallpapers() {
 }
 
 # ============================================================
-# PATH
+# PATH handling
 # ============================================================
 
 path_contains_bin() {
@@ -913,20 +1003,20 @@ path_contains_bin() {
     esac
 }
 
-file_contains_path_export() {
+path_file_contains_bin() {
     local file="$1"
 
     [[ -f "$file" ]] || return 1
 
-    grep -Fq \
-        'export PATH="$HOME/.local/bin:$PATH"' \
+    grep -Eq \
+        '(^|:|\$HOME/)\.local/bin|\.local/bin.*PATH|PATH=.*\.local/bin' \
         "$file"
 }
 
 add_path_to_file() {
     local file="$1"
 
-    if file_contains_path_export "$file"; then
+    if path_file_contains_bin "$file"; then
         return 0
     fi
 
@@ -935,7 +1025,8 @@ add_path_to_file() {
         return 0
     fi
 
-    mkdir -p "$(dirname "$file")"
+    mkdir -p \
+        "$(dirname "$file")"
 
     {
         printf '\n'
@@ -947,26 +1038,23 @@ add_path_to_file() {
 setup_path() {
     say "checking ~/.local/bin PATH"
 
-    # Check actual PATH first.
     if path_contains_bin; then
         success "~/.local/bin is already in PATH"
         return 0
     fi
 
-    # Make scripts available immediately during this run.
     if (( ! DRY )); then
         export PATH="$BIN:$PATH"
     fi
 
-    # Persist it for future sessions.
     add_path_to_file "$HOME/.profile"
-
-    if [[ -f "$HOME/.bashrc" ]]; then
-        add_path_to_file "$HOME/.bashrc"
-    fi
 
     if [[ -f "$HOME/.bash_profile" ]]; then
         add_path_to_file "$HOME/.bash_profile"
+    fi
+
+    if [[ -f "$HOME/.bashrc" ]]; then
+        add_path_to_file "$HOME/.bashrc"
     fi
 
     if [[ -f "$HOME/.zshrc" ]]; then
@@ -986,16 +1074,16 @@ apply_dconf() {
     [[ -f "$file" ]] || return 0
 
     need_command dconf || {
-        warn "dconf unavailable; skipping GTK settings"
+        warn "dconf not installed; skipping GTK settings"
         return 0
     }
 
     if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-        warn "no D-Bus session bus; GTK settings skipped"
+        warn "no D-Bus session bus; skipping dconf settings"
         return 0
     fi
 
-    say "applying GTK settings"
+    say "applying GTK interface settings"
 
     if (( DRY )); then
         info "[dry] would load dconf settings"
@@ -1004,70 +1092,39 @@ apply_dconf() {
 
     mkdir -p "$BACKUP"
 
-    dconf dump /org/gnome/desktop/interface/ \
+    dconf dump \
+        /org/gnome/desktop/interface/ \
         > "$BACKUP/interface.dconf.bak" \
         2>/dev/null \
         || true
 
-    dconf load /org/gnome/desktop/interface/ \
+    dconf load \
+        /org/gnome/desktop/interface/ \
         < "$file" \
         || warn "dconf load failed"
 }
 
 # ============================================================
-# Fresh-system greetd setup
+# greetd + tuigreet
 # ============================================================
 
 setup_greetd() {
     say "configuring greetd + tuigreet"
 
-    if ! need_command greetd; then
+    need_command greetd || {
         fail "greetd is not installed"
-        return 1
-    fi
-
-    if ! need_command tuigreet; then
-        fail "tuigreet is not installed"
-        return 1
-    fi
-
-    if ! need_command niri-session; then
-        fail "niri-session is not installed"
-        return 1
-    fi
-
-    [[ $EUID -ne 0 ]] || {
-        fail "do not run this installer as root"
         return 1
     }
 
-    printf "\n"
-    printf "${YELLOW}${BOLD}fresh-system login setup${RESET}\n"
-    printf "${GRAY}greetd will become the login manager.${RESET}\n"
-    printf "${GRAY}tuigreet will start niri-session after login.${RESET}\n"
-    printf "\n"
+    need_command tuigreet || {
+        fail "tuigreet is not installed"
+        return 1
+    }
 
-    if systemctl list-unit-files \
-        display-manager.service >/dev/null 2>&1; then
-
-        if systemctl is-enabled \
-            display-manager.service >/dev/null 2>&1; then
-
-            warn "another display manager appears to be enabled"
-
-            printf "${GRAY}greetd may conflict with it.${RESET}\n"
-            read -rp "continue anyway? [y/N] " answer
-
-            if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-                info "greetd setup skipped"
-                return 0
-            fi
-        fi
-    fi
-
-    # --------------------------------------------------------
-    # Back up existing greetd config.
-    # --------------------------------------------------------
+    need_command niri-session || {
+        fail "niri-session is not installed"
+        return 1
+    }
 
     if [[ -e /etc/greetd/config.toml ]]; then
         say "backing up existing greetd configuration"
@@ -1080,138 +1137,67 @@ setup_greetd() {
             "$BACKUP/etc/greetd/config.toml"
     fi
 
-    # --------------------------------------------------------
-    # Write config.
-    # --------------------------------------------------------
+    if (( DRY )); then
+        info "[dry] would write /etc/greetd/config.toml"
+        info "[dry] would enable greetd.service"
+        return 0
+    fi
 
     say "writing greetd configuration"
 
-    if (( DRY )); then
-        info "[dry] would write /etc/greetd/config.toml"
-    else
-        sudo install -d \
-            -m 0755 \
-            /etc/greetd
+    sudo install \
+        -d \
+        -m 0755 \
+        /etc/greetd
 
-        sudo tee /etc/greetd/config.toml >/dev/null <<'EOF'
+    sudo tee /etc/greetd/config.toml >/dev/null <<'EOF'
 [terminal]
 vt = 1
 
 [default_session]
-command = "tuigreet --time --remember --remember-session --cmd niri-session"
+command = "tuigreet --time --remember --remember-session --asterisks --cmd niri-session"
 user = "greeter"
 EOF
-    fi
-
-    # --------------------------------------------------------
-    # Enable greetd for next boot.
-    #
-    # We deliberately do NOT start it right now, because doing
-    # that while the installer is running from a login shell can
-    # yank the current session out from underneath us.
-    # --------------------------------------------------------
 
     say "enabling greetd"
 
-    run sudo systemctl enable greetd.service
+    sudo systemctl enable greetd.service
 
     success "greetd configured"
     success "tuigreet configured"
-    success "Niri session configured"
+    success "Niri configured as the login session"
 }
 
 # ============================================================
-# Fresh Arch bootstrap
+# Fresh system services
 # ============================================================
 
-fresh_install() {
-    say "starting fresh Arch setup"
+setup_fresh_services() {
+    say "configuring fresh-system services"
 
-    validate_repo
+    if need_command systemctl; then
+        if systemctl list-unit-files \
+            NetworkManager.service >/dev/null 2>&1; then
 
-    if (( DEPS )); then
-        install_deps
+            say "enabling NetworkManager"
+
+            run sudo systemctl enable \
+                NetworkManager.service
+        fi
+
+        if systemctl list-unit-files \
+            bluetooth.service >/dev/null 2>&1; then
+
+            say "enabling Bluetooth"
+
+            run sudo systemctl enable \
+                bluetooth.service
+        fi
     else
-        warn "dependency installation disabled"
+        warn "systemctl unavailable; cannot configure services"
     fi
-
-    install_configs
-    install_home_files
-    install_wallfliper
-    install_scripts
-    install_wallpapers
-    setup_path
-    apply_dconf
 
     setup_greetd
-
-    verify_installation
-
-    printf "\n"
-
-    if (( ! DRY )); then
-        read -rp "reboot into the new system now? [y/N] " answer
-
-        if [[ "$answer" =~ ^[Yy]$ ]]; then
-            say "rebooting"
-            sudo systemctl reboot
-        fi
-    fi
-}
-
-# ============================================================
-# Normal full install
-# ============================================================
-
-full_install() {
-    validate_repo
-
-    if (( DEPS )); then
-        install_deps
-    else
-        info "dependency installation disabled"
-    fi
-
-    install_configs
-    install_home_files
-    install_wallfliper
-    install_scripts
-    install_wallpapers
-    setup_path
-    apply_dconf
-
-    verify_installation
-}
-
-# ============================================================
-# Config-only install
-# ============================================================
-
-configs_only() {
-    validate_repo
-
-    install_configs
-    install_home_files
-    install_wallfliper
-    install_scripts
-    install_wallpapers
-    setup_path
-    apply_dconf
-
-    verify_installation
-}
-
-# ============================================================
-# Packages-only
-# ============================================================
-
-packages_only() {
-    if (( ! DEPS )); then
-        warn "--no-deps was supplied; nothing to install"
-        return 0
-    fi
-
-    install_deps
 }
 
 # ============================================================
@@ -1232,56 +1218,47 @@ check_command_status() {
 verify_installation() {
     say "checking installation"
 
-    # Core
     check_command_status niri "Niri"
+    check_command_status niri-session "Niri session"
     check_command_status quickshell "Quickshell"
     check_command_status kitty "Kitty"
     check_command_status kate "Kate"
 
-    # Wallpaper
     check_command_status awww "awww"
     check_command_status mpv "mpv"
     check_command_status ffmpeg "ffmpeg"
-
-    # Desktop
     check_command_status python "Python"
-    check_command_status pavucontrol "pavucontrol"
+
     check_command_status thunar "Thunar"
     check_command_status firefox "Firefox"
     check_command_status nvim "Neovim"
 
-    # Fastfetch is only checked as an application.
     if need_command fastfetch; then
         success "Fastfetch"
     elif (( ! MINIMAL )); then
         warn "Fastfetch missing"
     fi
 
-    # Fresh-system pieces
-    if (( FRESH )); then
-        check_command_status greetd "greetd"
-        check_command_status tuigreet "tuigreet"
-        check_command_status NetworkManager "NetworkManager"
-
-        if [[ -f /etc/greetd/config.toml ]]; then
-            success "greetd config exists"
-        else
-            warn "greetd config missing"
-        fi
-    fi
-
-    # --------------------------------------------------------
-    # Waybar intentionally gets NO package check.
-    # We merely acknowledge an existing config.
-    # --------------------------------------------------------
-
     if [[ -d "$CONFIG/waybar" ]]; then
         info "existing Waybar config detected and left untouched"
     fi
 
-    # --------------------------------------------------------
-    # Wallfliper dependency check
-    # --------------------------------------------------------
+    if path_contains_bin; then
+        success "~/.local/bin is in PATH"
+    else
+        warn "~/.local/bin is not currently in PATH"
+    fi
+
+    if (( FRESH )); then
+        check_command_status greetd "greetd"
+        check_command_status tuigreet "tuigreet"
+
+        if [[ -f /etc/greetd/config.toml ]]; then
+            success "greetd configuration"
+        else
+            warn "greetd configuration missing"
+        fi
+    fi
 
     if [[ -f "$SHARE/wallfliper/main.py" ]]; then
         say "checking Wallfliper dependencies"
@@ -1299,16 +1276,189 @@ verify_installation() {
             fi
         fi
     fi
+}
 
-    # --------------------------------------------------------
-    # PATH
-    # --------------------------------------------------------
+# ============================================================
+# Apply current rice
+# ============================================================
 
-    if path_contains_bin; then
-        success "~/.local/bin is in PATH"
+apply_rice() {
+    install_configs
+    install_home_files
+    install_wallfliper
+    install_scripts
+    install_wallpapers
+    setup_path
+    apply_dconf
+}
+
+# ============================================================
+# Full install
+# ============================================================
+
+do_full_install() {
+    FRESH=0
+    MINIMAL=0
+
+    validate_repo
+
+    if (( DEPS )); then
+        install_deps
     else
-        warn "~/.local/bin is not currently in PATH"
+        info "dependency installation disabled"
     fi
+
+    apply_rice
+    verify_installation
+}
+
+# ============================================================
+# Minimal install
+# ============================================================
+
+do_minimal_install() {
+    FRESH=0
+    MINIMAL=1
+
+    validate_repo
+
+    if (( DEPS )); then
+        install_deps
+    else
+        info "dependency installation disabled"
+    fi
+
+    apply_rice
+    verify_installation
+}
+
+# ============================================================
+# Update existing rice
+# ============================================================
+
+do_update() {
+    FRESH=0
+    MINIMAL=0
+
+    say "updating existing Alice rice"
+
+    update_repo
+    validate_repo
+
+    printf "\n"
+
+    if (( ! DRY )); then
+        printf "${YELLOW}${BOLD}the current repo will be installed over your existing rice.${RESET}\n"
+        printf "${GRAY}existing managed files are backed up first.${RESET}\n"
+        printf "${GRAY}Waybar and Fastfetch remain untouched.${RESET}\n\n"
+
+        read -rp "apply the updated rice? [Y/n] " answer
+        answer="${answer:-Y}"
+
+        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+            info "update cancelled before applying configs"
+            return 0
+        fi
+    fi
+
+    apply_rice
+    verify_installation
+
+    success "existing rice updated from the latest repo"
+}
+
+# ============================================================
+# Fresh Arch installation
+# ============================================================
+
+do_fresh_install() {
+    FRESH=1
+    MINIMAL=0
+
+    validate_repo
+
+    printf "\n"
+    printf "${YELLOW}${BOLD}fresh Arch setup${RESET}\n"
+    printf "${GRAY}this mode assumes this is a mostly-empty Arch installation.${RESET}\n"
+    printf "${GRAY}it will install greetd and make it the login manager.${RESET}\n"
+    printf "\n"
+
+    if (( ! DRY )); then
+        read -rp "continue with fresh-system setup? [Y/n] " answer
+        answer="${answer:-Y}"
+
+        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+            info "fresh setup cancelled"
+            return 0
+        fi
+    fi
+
+    if (( DEPS )); then
+        install_deps
+    else
+        warn "--no-deps was supplied; fresh package installation skipped"
+    fi
+
+    apply_rice
+
+    if (( DEPS )); then
+        setup_fresh_services
+    else
+        warn "greetd setup skipped because dependency installation is disabled"
+    fi
+
+    verify_installation
+
+    if (( ! DRY )); then
+        printf "\n"
+        printf "${WHITE}${BOLD}fresh setup is ready.${RESET}\n"
+        printf "${GRAY}reboot to enter tuigreet and launch Niri.${RESET}\n\n"
+
+        read -rp "reboot now? [y/N] " answer
+
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            say "rebooting"
+            sudo systemctl reboot
+        fi
+    fi
+}
+
+# ============================================================
+# Config-only
+# ============================================================
+
+do_configs_only() {
+    FRESH=0
+
+    validate_repo
+
+    apply_rice
+    verify_installation
+}
+
+# ============================================================
+# Packages-only
+# ============================================================
+
+do_packages_only() {
+    FRESH=0
+
+    if (( ! DEPS )); then
+        warn "--no-deps was supplied; nothing to install"
+        return 0
+    fi
+
+    if (( MINIMAL )); then
+        install_official_packages \
+            "${CORE_PKGS[@]}"
+    else
+        install_official_packages \
+            "${CORE_PKGS[@]}" \
+            "${NICE_PKGS[@]}"
+    fi
+
+    install_aur_packages \
+        "${AUR_PKGS[@]}"
 }
 
 # ============================================================
@@ -1323,22 +1473,32 @@ show_summary() {
     printf " ${PINK}│${RESET} ${BOLD}${GREEN}installation complete${RESET} ${DIM}:3${RESET}                       ${PINK}│${RESET}\n"
     printf " ${PINK}╰──────────────────────────────────────────────────────╯${RESET}\n\n"
 
-    success "Niri installed"
-    success "Alice rice installed"
-    success "Kate installed and configured"
-    success "Wallfliper installed"
-    success "~/.local/bin configured"
-
-    if (( FRESH )); then
+    if [[ "$MODE" == "update" ]]; then
+        success "existing rice updated from git"
+        success "latest repo configuration applied"
+    elif (( FRESH )); then
+        success "fresh Arch desktop installed"
+        success "Niri installed"
+        success "Kate installed and configured"
+        success "Wallfliper installed"
         success "greetd + tuigreet configured"
+        success "NetworkManager + Bluetooth configured"
+    elif (( MINIMAL )); then
+        success "minimal Niri setup installed"
+    else
+        success "Niri desktop installed"
+        success "Kate installed and configured"
+        success "Wallfliper installed"
     fi
+
+    success "~/.local/bin handled"
 
     printf "\n"
 
     printf "${CYAN}intentionally untouched:${RESET}\n"
     printf "  ${GRAY}•${RESET} ~/.config/waybar\n"
     printf "  ${GRAY}•${RESET} ~/.config/fastfetch\n"
-    printf "  ${GRAY}•${RESET} Kate session state\n"
+    printf "  ${GRAY}•${RESET} Kate session files\n"
 
     if [[ -d "$BACKUP" ]]; then
         printf "\n"
@@ -1348,14 +1508,18 @@ show_summary() {
     printf "\n"
 
     if (( FRESH )); then
-        printf "${WHITE}${BOLD}fresh Arch setup:${RESET}\n\n"
-        printf "  ${GRAY}•${RESET} reboot when ready\n"
+        printf "${WHITE}${BOLD}fresh-system next step:${RESET}\n\n"
+        printf "  ${GRAY}•${RESET} reboot\n"
         printf "  ${GRAY}•${RESET} log in through ${PINK}tuigreet${RESET}\n"
-        printf "  ${GRAY}•${RESET} select/login to ${PINK}Niri${RESET}\n"
+        printf "  ${GRAY}•${RESET} launch ${PINK}Niri${RESET}\n"
+    elif [[ "$MODE" == "update" ]]; then
+        printf "${WHITE}${BOLD}update next step:${RESET}\n\n"
+        printf "  ${GRAY}•${RESET} restart Niri / Quickshell if needed\n"
+        printf "  ${GRAY}•${RESET} open a new shell if PATH changed\n"
     else
-        printf "${WHITE}${BOLD}next steps:${RESET}\n\n"
-        printf "  ${GRAY}•${RESET} restart Quickshell if necessary\n"
-        printf "  ${GRAY}•${RESET} restart Niri or log out/in\n"
+        printf "${WHITE}${BOLD}next step:${RESET}\n\n"
+        printf "  ${GRAY}•${RESET} restart Niri / Quickshell if needed\n"
+        printf "  ${GRAY}•${RESET} open a new shell if PATH was changed\n"
     fi
 
     printf "\n"
@@ -1369,29 +1533,45 @@ show_summary() {
 main() {
     cd "$DOTFILES"
 
-    # --------------------------------------------------------
-    # Explicit command-line fresh mode.
-    # --------------------------------------------------------
+    require_arch
 
-    if (( FRESH )); then
-        fresh_install
-        show_summary
-        return 0
-    fi
+    case "$MODE" in
+        fresh)
+            do_fresh_install
+            show_summary
+            return 0
+            ;;
 
-    # --------------------------------------------------------
-    # No TUI.
-    # --------------------------------------------------------
+        minimal)
+            do_minimal_install
+            show_summary
+            return 0
+            ;;
+
+        update)
+            do_update
+            show_summary
+            return 0
+            ;;
+
+        configs)
+            do_configs_only
+            show_summary
+            return 0
+            ;;
+
+        packages)
+            do_packages_only
+            show_summary
+            return 0
+            ;;
+    esac
 
     if (( NO_TUI )); then
-        full_install
+        do_full_install
         show_summary
         return 0
     fi
-
-    # --------------------------------------------------------
-    # Dry-run notice.
-    # --------------------------------------------------------
 
     if (( DRY )); then
         info "dry-run mode enabled"
@@ -1399,20 +1579,19 @@ main() {
         pause_screen
     fi
 
-    local choice
-
     menu \
-        "what would you like to install?" \
+        "what would you like to do?" \
         "full setup       — Niri + rice + Kate + apps + AUR" \
+        "update existing  — pull newest repo + update rice" \
         "fresh Arch setup — everything + greetd + tuigreet" \
         "minimal setup    — Niri + rice + Kate + core packages" \
         "configs only     — dotfiles without packages" \
         "packages only    — install dependencies/apps" \
         "exit"
 
-    choice=$?
+    local choice="$MENU_RESULT"
 
-    if (( choice == 255 )); then
+    if (( choice == -1 )); then
         clear_screen
         info "bye :3"
         exit 0
@@ -1420,41 +1599,30 @@ main() {
 
     case "$choice" in
         0)
-            full_install
+            do_full_install
             ;;
 
         1)
-            FRESH=1
-            fresh_install
+            do_update
             ;;
 
         2)
-            MINIMAL=1
-
-            if (( DEPS )); then
-                install_deps
-            fi
-
-            install_configs
-            install_home_files
-            install_wallfliper
-            install_scripts
-            install_wallpapers
-            setup_path
-            apply_dconf
-
-            verify_installation
+            do_fresh_install
             ;;
 
         3)
-            configs_only
+            do_minimal_install
             ;;
 
         4)
-            packages_only
+            do_configs_only
             ;;
 
         5)
+            do_packages_only
+            ;;
+
+        6)
             clear_screen
             info "bye :3"
             exit 0
@@ -1470,3 +1638,4 @@ main() {
 }
 
 main "$@"
+
