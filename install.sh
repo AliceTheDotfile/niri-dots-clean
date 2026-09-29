@@ -27,7 +27,20 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Local repository: use the Python installer directly.
+<<<<<<< Updated upstream
 if [[ -f "$(dirname "${BASH_SOURCE[0]}")/install.py" ]]; then
+=======
+# BASH_SOURCE[0] can be unset when this script is piped through bash,
+# so never index it without a default under `set -u`.
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
+SCRIPT_DIR=""
+
+if [[ -n "$SCRIPT_SOURCE" ]]; then
+    SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" 2>/dev/null && pwd -P)" || true
+fi
+
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install.py" ]]; then
+>>>>>>> Stashed changes
     command -v python3 >/dev/null 2>&1 || {
         if command -v sudo >/dev/null 2>&1 && command -v pacman >/dev/null 2>&1; then
             sudo pacman -Syu --needed --noconfirm python
@@ -37,7 +50,11 @@ if [[ -f "$(dirname "${BASH_SOURCE[0]}")/install.py" ]]; then
         fi
     }
 
+<<<<<<< Updated upstream
     exec python3 "$(dirname "${BASH_SOURCE[0]}")/install.py" "$@"
+=======
+    exec python3 "$SCRIPT_DIR/install.py" "$@"
+>>>>>>> Stashed changes
 fi
 
 command -v curl >/dev/null 2>&1 || {
@@ -64,7 +81,11 @@ fi
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/alice-niri-installer.XXXXXXXX")"
 SCRIPT_PATH="$TMP_DIR/install.py"
 
+<<<<<<< Updated upstream
 printf "\033[38;5;205m::\033[0m downloading Alice\047s Python installer...\n"
+=======
+printf "\033[38;5;205m::\033[0m downloading Alice's Python installer...\n"
+>>>>>>> Stashed changes
 
 curl \
     --fail \
@@ -76,4 +97,8 @@ curl \
     "$RAW_URL" \
     -o "$SCRIPT_PATH"
 
+<<<<<<< Updated upstream
 python3 "$SCRIPT_PATH" "$@"
+=======
+ALICE_NIRI_DOTS_REMOTE=1 python3 "$SCRIPT_PATH" "$@"
+>>>>>>> Stashed changes
