@@ -7,20 +7,13 @@
 #   ./install.sh --dry-run
 #   ./install.sh --no-deps
 #   ./install.sh --minimal
-#   ./install.sh --help
+#   ./install.sh --no-tui
 #
-# Features:
-#   - Nice keyboard-driven TUI
-#   - Installs Niri and the full desktop stack
-#   - Installs useful everyday applications
-#   - Installs AUR packages through yay/paru
-#   - Can bootstrap yay automatically
-#   - Backs up existing configs before replacing them
-#   - Installs ~/.local/bin and fixes PATH automatically
-#   - Installs Wallfliper + dependencies
-#   - Installs wallpapers without overwriting existing files
-#   - Runs dependency checks after installation
-#   - Supports dry-run mode
+# Notes:
+#   - Never touches Waybar.
+#   - Never touches Fastfetch configuration.
+#   - Backs up files before replacing them.
+#   - Adds ~/.local/bin to PATH if it is not already present.
 #
 
 set -Eeuo pipefail
@@ -33,18 +26,19 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 SHARE="${XDG_DATA_HOME:-$HOME/.local/share}"
 BIN="$HOME/.local/bin"
+
 BACKUP_ROOT="$HOME/.dotfiles-backup"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP="$BACKUP_ROOT/$TIMESTAMP"
-
-# ============================================================
-# Options
-# ============================================================
 
 DEPS=1
 DRY=0
 MINIMAL=0
 NO_TUI=0
+
+# ============================================================
+# Arguments
+# ============================================================
 
 for arg in "$@"; do
     case "$arg" in
@@ -71,7 +65,19 @@ Usage:
   ./install.sh --minimal      Install only core packages
   ./install.sh --no-tui       Skip the menu
 
-Options can be combined.
+The installer:
+  - installs Niri
+  - installs required rice dependencies
+  - installs useful desktop applications
+  - installs Wallfliper
+  - installs wallpapers
+  - backs up replaced files
+  - adds ~/.local/bin to PATH when needed
+
+The installer NEVER manages:
+  - ~/.config/waybar
+  - Waybar package installation
+  - ~/.config/fastfetch
 EOF
             exit 0
             ;;
@@ -83,7 +89,7 @@ EOF
 done
 
 # ============================================================
-# Colors / UI
+# Colors
 # ============================================================
 
 RESET='\033[0m'
@@ -98,6 +104,10 @@ YELLOW='\033[38;5;221m'
 RED='\033[38;5;203m'
 WHITE='\033[97m'
 GRAY='\033[90m'
+
+# ============================================================
+# Output helpers
+# ============================================================
 
 clear_screen() {
     printf '\033[2J\033[H'
@@ -139,18 +149,6 @@ pause_screen() {
 }
 
 # ============================================================
-# Cleanup / errors
-# ============================================================
-
-cleanup() {
-    printf '\033[0m\n'
-}
-
-trap cleanup EXIT
-
-trap 'fail "installer failed on line $LINENO"; exit 1' ERR
-
-# ============================================================
 # TUI
 # ============================================================
 
@@ -167,9 +165,11 @@ draw_header() {
 menu() {
     local title="$1"
     shift
+
     local options=("$@")
     local selected=0
-    local key rest
+    local key
+    local rest
 
     while true; do
         draw_header
@@ -193,23 +193,28 @@ menu() {
             "")
                 return "$selected"
                 ;;
+
             q|Q)
                 return 255
                 ;;
+
             j)
-                (( selected++ ))
+                selected=$((selected + 1))
                 ;;
+
             k)
-                (( selected-- ))
+                selected=$((selected - 1))
                 ;;
+
             $'\x1b')
                 IFS= read -rsn2 rest || true
+
                 case "$rest" in
                     '[A')
-                        (( selected-- ))
+                        selected=$((selected - 1))
                         ;;
                     '[B')
-                        (( selected++ ))
+                        selected=$((selected + 1))
                         ;;
                 esac
                 ;;
@@ -229,15 +234,18 @@ menu() {
 # Package lists
 # ============================================================
 
-# These are needed for the rice itself and the programs inside it.
+# Core packages required by the rice.
+#
+# IMPORTANT:
+#   Waybar is intentionally NOT here.
+#
 CORE_PKGS=(
-    # Wayland / Niri
+    # Compositor
     niri
     xwayland-satellite
 
-    # Shell / bar / terminal
+    # Shell / UI
     quickshell
-    waybar
     kitty
     swaync
     wofi
@@ -248,8 +256,9 @@ CORE_PKGS=(
     kvantum
     layer-shell-qt
     papirus-icon-theme
+    dconf
 
-    # Wallpaper
+    # Wallpapers
     awww
     ffmpeg
     mpv
@@ -262,28 +271,26 @@ CORE_PKGS=(
     playerctl
     pavucontrol
 
-    # Brightness / screenshots / clipboard
+    # Wayland utilities
     brightnessctl
     grim
     slurp
     wl-clipboard
 
     # Desktop integration
-    dconf
     xdg-utils
     xdg-user-dirs
     xdg-desktop-portal
     xdg-desktop-portal-gtk
-    xdg-desktop-portal-gnome
 
-    # Network / Bluetooth
+    # Networking / Bluetooth
     networkmanager
     network-manager-applet
     bluez
     bluez-utils
     blueman
 
-    # Python / tools
+    # General tools
     python
     jq
     rsync
@@ -297,22 +304,26 @@ CORE_PKGS=(
     woff2-font-awesome
 )
 
-# Everyday apps/tools that make a fresh Niri install actually nice to use.
+# Nice everyday applications.
+#
+# Fastfetch is allowed as an APPLICATION,
+# but its CONFIG DIRECTORY IS NEVER INSTALLED.
+#
 NICE_PKGS=(
     # Browser
     firefox
 
-    # File manager / file utilities
+    # File management
     thunar
     file-roller
     7zip
     unzip
     zip
 
-    # Media / image viewers
+    # Image / media
     imv
 
-    # Developer / terminal tools
+    # Terminal / development
     neovim
     fzf
     ripgrep
@@ -322,19 +333,22 @@ NICE_PKGS=(
     tree
     less
 
-    # Misc useful desktop tools
+    # System information
+    fastfetch
+
+    # Documentation
     man-db
     man-pages
 )
 
-# AUR-only packages.
+# AUR packages.
 AUR_PKGS=(
     mpvpaper
     neowall-bin
 )
 
 # ============================================================
-# Repo validation
+# Repository validation
 # ============================================================
 
 validate_repo() {
@@ -342,7 +356,6 @@ validate_repo() {
 
     local required=(
         "$DOTFILES/niri"
-        "$DOTFILES/waybar"
         "$DOTFILES/quickshell/my-shell"
         "$DOTFILES/wallfliper"
         "$DOTFILES/local/bin"
@@ -350,6 +363,7 @@ validate_repo() {
     )
 
     local missing=0
+    local path
 
     for path in "${required[@]}"; do
         if [[ ! -e "$path" ]]; then
@@ -366,7 +380,7 @@ validate_repo() {
 }
 
 # ============================================================
-# Package manager helpers
+# Package manager
 # ============================================================
 
 need_command() {
@@ -397,26 +411,27 @@ install_yay() {
         return 1
     fi
 
-    say "installing yay AUR helper"
+    say "installing yay"
 
     run sudo pacman -Syu --needed --noconfirm base-devel git
 
     local tmp
     tmp="$(mktemp -d)"
 
-    trap 'rm -rf "$tmp"' RETURN
-
-    run git clone https://aur.archlinux.org/yay.git "$tmp/yay"
-
     if (( DRY )); then
-        info "[dry] would build yay with makepkg"
+        info "[dry] would clone and build yay"
+        rm -rf "$tmp"
         return 0
     fi
+
+    git clone https://aur.archlinux.org/yay.git "$tmp/yay"
 
     (
         cd "$tmp/yay"
         makepkg -si --noconfirm
     )
+
+    rm -rf "$tmp"
 
     success "yay installed"
 }
@@ -438,11 +453,12 @@ install_official_packages() {
         fi
     done
 
-    ((${#valid[@]})) || return 0
+    if ((${#valid[@]} == 0)); then
+        return 0
+    fi
 
     say "installing ${#valid[@]} official packages"
 
-    # -Syu avoids the partial-upgrade trap on Arch.
     run sudo pacman -Syu --needed --noconfirm "${valid[@]}"
 
     success "official packages installed"
@@ -458,15 +474,15 @@ install_aur_packages() {
     if helper="$(find_aur_helper)"; then
         :
     else
-        warn "no yay or paru was found"
+        warn "no AUR helper was found"
+
         if (( DRY )); then
-            info "[dry] would bootstrap yay here"
+            info "[dry] would install yay"
             return 0
         fi
 
         printf "\n"
-        printf "${YELLOW}No AUR helper is installed.${RESET}\n"
-        printf "This setup uses a few AUR packages for Wallfliper/NeoWall.\n\n"
+        printf "${YELLOW}This setup uses a few AUR packages.${RESET}\n"
         read -rp "install yay automatically? [Y/n] " answer
         answer="${answer:-Y}"
 
@@ -488,14 +504,14 @@ install_aur_packages() {
 
 install_deps() {
     need_command pacman || {
-        fail "this installer currently supports Arch Linux / Arch-based systems with pacman"
+        fail "this installer requires Arch Linux / an Arch-based distro with pacman"
         return 1
     }
 
-    [[ $EUID -ne 0 ]] || {
+    if [[ $EUID -eq 0 ]]; then
         fail "do not run this installer as root"
         return 1
-    }
+    fi
 
     local packages=("${CORE_PKGS[@]}")
 
@@ -508,7 +524,7 @@ install_deps() {
 }
 
 # ============================================================
-# Backup + file installation
+# Backup
 # ============================================================
 
 backup_destination() {
@@ -519,6 +535,10 @@ backup_destination() {
         run mv "$dest" "$BACKUP/${dest#$HOME/}"
     fi
 }
+
+# ============================================================
+# Install files
+# ============================================================
 
 replace_home_token() {
     local path="$1"
@@ -557,6 +577,10 @@ place() {
     replace_home_token "$dest"
 }
 
+# ============================================================
+# Config installation
+# ============================================================
+
 install_configs() {
     say "installing configs"
 
@@ -566,12 +590,24 @@ install_configs() {
         "$SHARE" \
         "$HOME/Wallpapers"
 
+    # ========================================================
+    # IMPORTANT
+    #
+    # Fastfetch is NOT in this list.
+    # Waybar is NOT in this list.
+    #
+    # Therefore the installer never touches:
+    #
+    #   ~/.config/fastfetch
+    #   ~/.config/waybar
+    #
+    # ========================================================
+
     local configs=(
         alice-rice
         btop
         cava
         environment.d
-        fastfetch
         fontconfig
         gamearch
         gtk-3.0
@@ -580,7 +616,6 @@ install_configs() {
         niri
         qt6ct
         swaync
-        waybar
     )
 
     local name
@@ -594,7 +629,13 @@ install_configs() {
         "$CONFIG/quickshell/my-shell"
 
     success "desktop configs installed"
+    info "Fastfetch config untouched"
+    info "Waybar completely untouched"
 }
+
+# ============================================================
+# Home files
+# ============================================================
 
 install_home_files() {
     say "installing shell/theme files"
@@ -617,6 +658,10 @@ install_home_files() {
     success "shell and theme files installed"
 }
 
+# ============================================================
+# Wallfliper
+# ============================================================
+
 install_wallfliper() {
     say "installing Wallfliper"
 
@@ -628,28 +673,32 @@ install_wallfliper() {
         "$DOTFILES/wallfliper/config.json" \
         "$CONFIG/wallfliper/config.json"
 
-    # Convenience launcher so the installed Wallfliper doesn't
-    # require the user to manually type the Python path.
     local launcher="$BIN/wallfliper"
 
     if [[ ! -e "$DOTFILES/local/bin/wallfliper" ]]; then
+
         if [[ -e "$launcher" ]]; then
             backup_destination "$launcher"
         fi
 
         if (( DRY )); then
-            printf "${GRAY}[dry] would create %s${RESET}\n" "$launcher"
+            info "[dry] would create $launcher"
         else
             cat > "$launcher" <<EOF
 #!/usr/bin/env bash
 exec python "$SHARE/wallfliper/main.py" "\$@"
 EOF
+
             chmod +x "$launcher"
         fi
     fi
 
     success "Wallfliper installed"
 }
+
+# ============================================================
+# Scripts
+# ============================================================
 
 install_scripts() {
     say "installing scripts to ~/.local/bin"
@@ -664,7 +713,10 @@ install_scripts() {
 
         name="$(basename "$file")"
 
-        place "$file" "$BIN/$name"
+        place \
+            "$file" \
+            "$BIN/$name"
+
         run chmod +x "$BIN/$name"
     done
 
@@ -672,6 +724,10 @@ install_scripts() {
 
     success "scripts installed"
 }
+
+# ============================================================
+# Wallpapers
+# ============================================================
 
 install_wallpapers() {
     say "installing wallpapers"
@@ -703,39 +759,65 @@ install_wallpapers() {
 # PATH
 # ============================================================
 
-ensure_path_file() {
+path_contains_bin() {
+    case ":${PATH:-}:" in
+        *":$BIN:"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+add_path_to_file() {
     local file="$1"
 
-    [[ -e "$file" ]] || touch "$file"
+    [[ -e "$file" ]] || run touch "$file"
 
     if grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "$file" 2>/dev/null; then
         return 0
     fi
 
+    if (( DRY )); then
+        info "[dry] would add ~/.local/bin to ${file#$HOME/}"
+        return 0
+    fi
+
     {
         printf '\n'
-        printf '# Alice dotfiles - local user scripts\n'
+        printf '# Alice dotfiles - local scripts\n'
         printf 'export PATH="$HOME/.local/bin:$PATH"\n'
     } >> "$file"
 }
 
 setup_path() {
-    say "setting up ~/.local/bin"
+    say "checking ~/.local/bin PATH"
 
-    ensure_path_file "$HOME/.profile"
-    ensure_path_file "$HOME/.bashrc"
-
-    if [[ -f "$HOME/.zshrc" ]]; then
-        if ! grep -Fqx 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zshrc"; then
-            {
-                printf '\n'
-                printf '# Alice dotfiles - local user scripts\n'
-                printf 'export PATH="$HOME/.local/bin:$PATH"\n'
-            } >> "$HOME/.zshrc"
-        fi
+    # First check the PATH that the installer is actually running with.
+    if path_contains_bin; then
+        success "~/.local/bin is already in PATH"
+        return 0
     fi
 
-    success "~/.local/bin added to shell PATH"
+    # Make the current installer environment use it immediately.
+    if (( ! DRY )); then
+        export PATH="$BIN:$PATH"
+    fi
+
+    # Persist it for future shell sessions.
+    add_path_to_file "$HOME/.profile"
+    add_path_to_file "$HOME/.bashrc"
+
+    if [[ -f "$HOME/.bash_profile" ]]; then
+        add_path_to_file "$HOME/.bash_profile"
+    fi
+
+    if [[ -f "$HOME/.zshrc" ]]; then
+        add_path_to_file "$HOME/.zshrc"
+    fi
+
+    success "~/.local/bin added to PATH"
 }
 
 # ============================================================
@@ -748,21 +830,12 @@ apply_dconf() {
     [[ -f "$file" ]] || return 0
 
     need_command dconf || {
-        warn "dconf is not installed; skipping GTK desktop settings"
+        warn "dconf is not installed; skipping GTK settings"
         return 0
     }
 
-    local real_home
-
-    real_home="$(getent passwd "$(id -u)" | cut -d: -f6 || true)"
-
-    if [[ -n "$real_home" && "$HOME" != "$real_home" ]]; then
-        warn "HOME does not match passwd database; skipping dconf"
-        return 0
-    fi
-
     if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-        warn "no D-Bus session bus; GTK dconf settings will need to be loaded after login"
+        warn "no D-Bus session bus; GTK settings skipped"
         return 0
     fi
 
@@ -770,16 +843,15 @@ apply_dconf() {
 
     if (( ! DRY )); then
         mkdir -p "$BACKUP"
-        dconf dump /org/gnome/desktop/interface/ \
-            > "$BACKUP/interface.dconf.bak" 2>/dev/null \
-            || true
-    fi
 
-    if (( DRY )); then
-        info "[dry] dconf load would be performed"
-    else
+        dconf dump /org/gnome/desktop/interface/ \
+            > "$BACKUP/interface.dconf.bak" \
+            2>/dev/null || true
+
         dconf load /org/gnome/desktop/interface/ < "$file" \
             || warn "dconf load failed"
+    else
+        info "[dry] would load dconf settings"
     fi
 }
 
@@ -825,7 +897,7 @@ setup_services() {
 
     printf "\n"
     printf "${PURPLE}${BOLD}desktop services${RESET}\n"
-    printf "${GRAY}NetworkManager and Bluetooth make a fresh Niri install much nicer to use.${RESET}\n"
+    printf "${GRAY}NetworkManager and Bluetooth are useful on a fresh Niri install.${RESET}\n"
     printf "\n"
 
     read -rp "enable NetworkManager + Bluetooth? [Y/n] " answer
@@ -856,7 +928,6 @@ verify_installation() {
     say "checking installation"
 
     check_command_status niri "Niri"
-    check_command_status waybar "Waybar"
     check_command_status quickshell "Quickshell"
     check_command_status kitty "Kitty"
     check_command_status awww "awww"
@@ -866,14 +937,23 @@ verify_installation() {
     check_command_status pavucontrol "pavucontrol"
     check_command_status thunar "Thunar"
     check_command_status firefox "Firefox"
-    check_command_status neovim "Neovim"
-    check_command_status "$BIN/wallfliper" "Wallfliper launcher"
+    check_command_status nvim "Neovim"
+    check_command_status "$BIN/wallfliper" "Wallfliper"
+
+    # Fastfetch is only checked as an app.
+    # Its configuration is intentionally never touched.
+    check_command_status fastfetch "Fastfetch"
+
+    # Absolutely no Waybar check here.
+    if [[ -d "$CONFIG/waybar" ]]; then
+        info "existing Waybar config detected and left untouched"
+    fi
 
     if [[ -f "$SHARE/wallfliper/main.py" ]]; then
-        say "running Wallfliper dependency check"
+        say "checking Wallfliper dependencies"
 
         if (( DRY )); then
-            info "[dry] would run Wallfliper --check"
+            info "[dry] would run Wallfliper dependency check"
         else
             if python "$SHARE/wallfliper/main.py" --check; then
                 success "Wallfliper dependency check passed"
@@ -881,6 +961,12 @@ verify_installation() {
                 warn "Wallfliper reported missing dependencies"
             fi
         fi
+    fi
+
+    if path_contains_bin; then
+        success "~/.local/bin is in PATH"
+    else
+        warn "~/.local/bin is not currently in PATH"
     fi
 }
 
@@ -896,16 +982,16 @@ show_summary() {
     printf " ${PINK}│${RESET} ${BOLD}${GREEN}installation complete${RESET} ${DIM}:3${RESET}                       ${PINK}│${RESET}\n"
     printf " ${PINK}╰──────────────────────────────────────────────────────╯${RESET}\n\n"
 
-    success "Niri desktop configuration installed"
-
-    if (( ! MINIMAL )); then
-        success "everyday desktop apps installed"
-    else
-        info "minimal package profile selected"
-    fi
-
+    success "Niri desktop installed"
+    success "Alice rice installed"
     success "Wallfliper installed"
     success "~/.local/bin configured"
+
+    printf "\n"
+
+    printf "${CYAN}untouched:${RESET}\n"
+    printf "  ${GRAY}•${RESET} ~/.config/fastfetch\n"
+    printf "  ${GRAY}•${RESET} ~/.config/waybar\n"
 
     if [[ -d "$BACKUP" ]]; then
         printf "\n"
@@ -915,15 +1001,15 @@ show_summary() {
     printf "\n"
     printf "${WHITE}${BOLD}next steps${RESET}\n\n"
     printf "  ${GRAY}•${RESET} log out and select ${PINK}Niri${RESET}\n"
-    printf "  ${GRAY}•${RESET} or restart your current Niri session\n"
-    printf "  ${GRAY}•${RESET} restart Quickshell / Waybar if they're already running\n"
+    printf "  ${GRAY}•${RESET} or restart your Niri session\n"
+    printf "  ${GRAY}•${RESET} restart Quickshell if needed\n"
 
     printf "\n"
     printf "${DIM}have fun rice-ing :3${RESET}\n\n"
 }
 
 # ============================================================
-# Installer actions
+# Install modes
 # ============================================================
 
 do_full_install() {
@@ -948,6 +1034,7 @@ do_full_install() {
 
 do_configs_only() {
     validate_repo
+
     install_configs
     install_home_files
     install_wallfliper
@@ -995,8 +1082,8 @@ main() {
             "what would you like to install?" \
             "full setup      — Niri + rice + apps + AUR + services" \
             "minimal setup   — Niri + rice + required packages" \
-            "configs only    — just install the dotfiles" \
-            "packages only   — just install dependencies/apps" \
+            "configs only    — dotfiles without package installation" \
+            "packages only   — install dependencies/apps" \
             "exit"
 
         choice=$?
@@ -1014,11 +1101,19 @@ main() {
             ;;
         1)
             MINIMAL=1
-            do_configs_only
+
             if (( DEPS )); then
-                install_official_packages "${CORE_PKGS[@]}"
-                install_aur_packages "${AUR_PKGS[@]}"
+                install_deps
             fi
+
+            install_configs
+            install_home_files
+            install_wallfliper
+            install_scripts
+            install_wallpapers
+            setup_path
+            apply_dconf
+            verify_installation
             ;;
         2)
             do_configs_only
