@@ -27,12 +27,13 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install.sh" && -d "$SCRIPT_DIR/niri" ]
     cd -- "$SCRIPT_DIR"
 fi
 
-# The Python installer is embedded below. The Python source comes from fd 3,
-# while stdin stays available for the interactive installer. When install.sh
-# is piped through curl, Bash receives the script on stdin, so reconnect stdin
-# to the user's terminal before launching Python.
+# The Python installer is embedded below. Keep Bash's stdin alone because
+# it may be the curl pipe containing this script. Give Python a separate
+# terminal fd instead, so the interactive menu can still read keystrokes.
 if [[ ! -t 0 && -r /dev/tty ]]; then
-    exec </dev/tty
+    exec 4</dev/tty
+else
+    exec 4<&0
 fi
 
 command -v python3 >/dev/null 2>&1 || {
@@ -50,7 +51,7 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-python3 /dev/fd/3 "$@" 3<<'PYTHON'
+python3 /dev/fd/3 "$@" </dev/fd/4 3<<'PYTHON'
 """
 Alice's Niri dotfiles installer :3
 
