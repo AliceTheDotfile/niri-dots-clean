@@ -610,7 +610,7 @@ class Installer:
             return
 
         self.say("pulling latest dotfiles")
-        self.run_cmd(["git", "-C", str(self.dotfiles), "pull", "--ff-only"])
+        self.run_cmd(["git", "-C", str(self.dotfiles), "-c", "core.hooksPath=/dev/null", "pull", "--ff-only"])
         self.success("dotfiles repository updated")
 
     # --------------------------------------------------------
