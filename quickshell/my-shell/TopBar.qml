@@ -20,37 +20,23 @@ Item {
     readonly property int triggerHeight: 3
     readonly property int borderWidth: 2
 
-    readonly property int animationDuration: 180
-    readonly property int triggerExpandDuration: 300
-    readonly property int triggerCollapseDuration: 150
+    readonly property int animationDuration: 250
+    readonly property int triggerExpandDuration: 500
+    readonly property int triggerCollapseDuration: 500
     readonly property int triggerColorDuration: 100
     readonly property int hideDelay: 300
     readonly property real panelOpacity: 0.95
 
+    readonly property real triggerExpansionCurve: 0.6
+
     // ============================================================
     // EASING
     // ============================================================
-    //
-    // Opening:
-    //   smooth cubic deceleration.
-    //
-    // Closing:
-    //   exponential deceleration. Starts quickly and slows
-    //   dramatically as it approaches the end.
-    //
-    // Try:
-    //   Easing.OutQuad
-    //   Easing.OutCubic
-    //   Easing.OutQuart
-    //   Easing.OutQuint
-    //   Easing.OutExpo
-    //
-    // OutExpo gives the strongest "WHOOSH -> crawl -> stop" effect.
 
-    readonly property int openingEasing: Easing.OutCubic
+    readonly property int openingEasing: Easing.OutExpo
     readonly property int closingEasing: Easing.OutExpo
 
-    readonly property int triggerOpeningEasing: Easing.OutCubic
+    readonly property int triggerOpeningEasing: Easing.OutExpo
     readonly property int triggerClosingEasing: Easing.OutExpo
 
     // ============================================================
@@ -77,6 +63,7 @@ Item {
     property bool insideTrigger: false
     property bool insideDrawer: false
     property real progress: 0
+    property real triggerProgress: 0.0
     property string activeMenu: ""
 
     property real volumeLevel: 0.70
@@ -127,8 +114,7 @@ Item {
 
     readonly property bool triggerBarExpanded:
     root.insideTrigger ||
-    root.insideDrawer ||
-    root.progress > 0
+    root.insideDrawer
 
     // ============================================================
     // CLOCK
@@ -715,6 +701,10 @@ Item {
         revealAnimation.from = root.progress
         revealAnimation.to = 1
         revealAnimation.restart()
+
+        triggerAnimation.from = root.triggerProgress
+        triggerAnimation.to = 1.0
+        triggerAnimation.restart()
     }
 
     function scheduleHide() {
@@ -733,6 +723,10 @@ Item {
                 revealAnimation.from = root.progress
                 revealAnimation.to = 0
                 revealAnimation.restart()
+
+                triggerAnimation.from = root.triggerProgress
+                triggerAnimation.to = 0.0
+                triggerAnimation.restart()
             }
         }
     }
@@ -740,13 +734,6 @@ Item {
     // ============================================================
     // MAIN DRAWER ANIMATION
     // ============================================================
-    //
-    // Important:
-    //   Opening uses openingEasing.
-    //   Closing uses closingEasing.
-    //
-    // Because the animation explicitly sets `to`, the easing can be
-    // selected from the direction of the animation.
 
     NumberAnimation {
         id: revealAnimation
@@ -759,6 +746,16 @@ Item {
         to === 0
         ? root.closingEasing
         : root.openingEasing
+    }
+
+    NumberAnimation {
+        id: triggerAnimation
+
+        target: root
+        property: "triggerProgress"
+
+        duration: root.triggerExpandDuration
+        easing.type: Easing.OutExpo
     }
 
     readonly property real targetExpandedHeight: {
@@ -806,11 +803,7 @@ Item {
         NumberAnimation {
             duration: root.animationDuration
 
-            easing.type:
-            root.currentExpandedHeight >
-            root.targetExpandedHeight
-            ? root.closingEasing
-            : root.openingEasing
+            easing.type: Easing.OutExpo
         }
     }
 
@@ -839,48 +832,14 @@ Item {
             anchors.top: parent.top
             anchors.horizontalCenter: parent.horizontalCenter
 
-            height:
-            root.triggerBarExpanded
-            ? root.borderWidth
-            : root.triggerHeight
+            height: root.triggerHeight + (root.borderWidth - root.triggerHeight) * root.triggerProgress
 
-            width:
-            root.triggerBarExpanded
-            ? root.panelWidth
-            : root.triggerWidth
+            width: root.triggerWidth + (root.panelWidth - root.triggerWidth) * Math.pow(root.triggerProgress, root.triggerExpansionCurve)
 
             color:
             root.triggerBarExpanded
             ? root.colAccent
             : root.colViolet
-
-            Behavior on width {
-                NumberAnimation {
-                    duration:
-                    root.triggerBarExpanded
-                    ? root.triggerExpandDuration
-                    : root.triggerCollapseDuration
-
-                    easing.type:
-                    root.triggerBarExpanded
-                    ? root.triggerOpeningEasing
-                    : root.triggerClosingEasing
-                }
-            }
-
-            Behavior on height {
-                NumberAnimation {
-                    duration:
-                    root.triggerBarExpanded
-                    ? root.triggerExpandDuration
-                    : root.triggerCollapseDuration
-
-                    easing.type:
-                    root.triggerBarExpanded
-                    ? root.triggerOpeningEasing
-                    : root.triggerClosingEasing
-                }
-            }
 
             Behavior on color {
                 ColorAnimation {
