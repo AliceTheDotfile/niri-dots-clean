@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 
 """
@@ -13,11 +12,14 @@ Normal sync:
     - does not adopt random ~/.local/bin files
     - does not adopt random wallpapers
     - NEVER syncs ~/.bashrc
+    - NEVER syncs ~/.config/niri/parts/output.kdl
+    - NEVER syncs ~/.icons/Bibata-Material-Cloud
 
 Adopt-new mode:
     - also finds recently-created files inside managed rice trees
     - only considers files inside directories already represented
       in the Git repository
+    - NEVER adopts ~/.config/niri/parts/output.kdl
 
 Usage:
     ./sync.py
@@ -48,7 +50,9 @@ Never managed:
     ~/.bashrc
     ~/.config/waybar
     ~/.config/fastfetch
+    ~/.config/niri/parts/output.kdl
     ~/.local/share/kate/anonymous.katesession
+    ~/.icons/Bibata-Material-Cloud
     .qmlls.ini
     *.bak
     *.pyc
@@ -125,10 +129,10 @@ HOME_FILES = (
     ".local/share/color-schemes/AliceNight.colors",
 )
 
+# Bibata-Material-Cloud intentionally NOT included.
 HOME_DIRS = (
     ".config/kate",
     ".local/share/themes/AliceNight",
-    ".icons/Bibata-Material-Cloud",
 )
 
 QUICKSHELL_SOURCE = CONFIG / "quickshell" / "my-shell"
@@ -176,6 +180,29 @@ def ignored(path: Path) -> bool:
         or path.suffix in IGNORE_SUFFIXES
         or ".git" in path.parts
         or "__pycache__" in path.parts
+    )
+
+
+def is_niri_output(path: Path) -> bool:
+    """
+    ~/.config/niri/parts/output.kdl is machine-specific.
+
+    It must never be copied into the repository,
+    discovered as a new file, updated, or pruned.
+    """
+    try:
+        return (
+            path.relative_to(CONFIG / "niri")
+            == Path("parts/output.kdl")
+        )
+    except ValueError:
+        return False
+
+
+def ignored_for_sync(path: Path) -> bool:
+    return (
+        ignored(path)
+        or is_niri_output(path)
     )
 
 
@@ -295,13 +322,13 @@ def iter_files(root: Path):
         return
 
     if is_file_like(root):
-        if not ignored(root):
+        if not ignored_for_sync(root):
             yield root
         return
 
     try:
         for path in root.rglob("*"):
-            if ignored(path):
+            if ignored_for_sync(path):
                 continue
 
             if is_file_like(path):
@@ -443,10 +470,15 @@ def is_tracked(
 ) -> bool:
     relative = repo_relative(path)
 
-    return (
-        relative is not None
-        and relative in TRACKED
-    )
+    if relative is None:
+        return False
+
+    # output.kdl is deliberately unmanaged even if
+    # an old copy happens to exist in the repository.
+    if relative == "niri/parts/output.kdl":
+        return False
+
+    return relative in TRACKED
 
 
 def parent_tracked(
@@ -455,6 +487,10 @@ def parent_tracked(
     relative = repo_relative(path)
 
     if relative is None:
+        return False
+
+    # Never allow discovery/adoption of machine-local output.kdl.
+    if relative == "niri/parts/output.kdl":
         return False
 
     parent = (
@@ -485,8 +521,15 @@ def normalize_repo(
 ) -> None:
     if (
         not path.is_file()
-        or ignored(path)
+        or ignored_for_sync(path)
         or not is_text_file(path)
+    ):
+        return
+
+    # Extra safety: output.kdl should never be normalized
+    # because it should never enter the repository.
+    if is_niri_output(
+        CONFIG / "niri" / path.name
     ):
         return
 
@@ -549,6 +592,30 @@ def compare_directory(
             destination / relative
         )
 
+        # ====================================================
+        # Machine-local Niri output configuration.
+        #
+        # This is intentionally skipped in every mode:
+        #   - normal sync
+        #   - adopt-new
+        #   - discover
+        #   - prune
+        # ====================================================
+
+        if (
+            source == CONFIG / "niri"
+            and relative
+            == Path("parts/output.kdl")
+        ):
+            continue
+
+        if (
+            destination == DOTFILES / "niri"
+            and relative
+            == Path("parts/output.kdl")
+        ):
+            continue
+
         if exists(destination_path):
             if not same_file(
                 source_path,
@@ -585,6 +652,15 @@ def compare_directory(
         ):
             source_path = source / relative
 
+            # Never prune Niri's machine-specific output.kdl.
+            if (
+                destination
+                == DOTFILES / "niri"
+                and relative
+                == Path("parts/output.kdl")
+            ):
+                continue
+
             if (
                 not exists(source_path)
                 and is_tracked(
@@ -612,6 +688,16 @@ def compare_file(
     *,
     prune: bool = False,
 ) -> list[Change]:
+
+    # Extra protection for the Niri output file.
+    if is_niri_output(source):
+        return []
+
+    if (
+        repo_relative(destination)
+        == "niri/parts/output.kdl"
+    ):
+        return []
 
     if exists(source):
 
@@ -810,6 +896,8 @@ def build_plan(
 
     #
     # Explicit home directories.
+    #
+    # Bibata-Material-Cloud intentionally NOT here.
     #
     for item in HOME_DIRS:
         changes.extend(
@@ -1140,6 +1228,14 @@ def apply_change(
     change: Change,
 ) -> None:
 
+    # Absolute last line of defense:
+    # output.kdl must never be written by this synchronizer.
+    if (
+        repo_relative(change.destination)
+        == "niri/parts/output.kdl"
+    ):
+        return
+
     destination = (
         change.destination
     )
@@ -1189,6 +1285,7 @@ def apply_change(
             source,
             destination,
         )
+
         normalize_repo(
             destination
         )
@@ -1800,4 +1897,3 @@ if __name__ == "__main__":
     raise SystemExit(
         main()
     )
-
