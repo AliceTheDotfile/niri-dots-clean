@@ -94,7 +94,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 REPO_URL = "https://github.com/AliceTheDotfile/niri-dots-clean"
 ARCHIVE_URL = (
     "https://codeload.github.com/AliceTheDotfile/"
@@ -877,72 +877,135 @@ class Installer:
     # --------------------------------------------------------
 
     def load_update_manifest(self) -> tuple[set[str], set[str]]:
+        """
+        Read the exact manifest written by sync.py.
+
+        sync.py writes:
+
+            {
+                "version": 1,
+                "managed": ["repo/path"],
+                "deleted": ["repo/path"]
+            }
+
+        `managed` means the file is intentionally shared and may be replaced
+        on existing systems. `deleted` means the shared baseline intentionally
+        removed that file and an update should remove it from the live system.
+
+        A missing manifest is deliberately treated as an EMPTY manifest. This
+        prevents an update on an older repository from unexpectedly replacing
+        the whole machine's configuration.
+        """
         assert self.dotfiles is not None
 
         path = self.dotfiles / UPDATE_MANIFEST_REL
+
         if not path.is_file():
             self.warn(
-                "no update manifest exists yet; no shared-rice files will "
-                "be changed by this update"
+                f"{UPDATE_MANIFEST_REL} is missing; existing-system update "
+                "will not overwrite any rice files"
+            )
+            self.info(
+                "run sync.py on the source machine to create the shared-file manifest"
             )
             return set(), set()
 
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(
+                path.read_text(encoding="utf-8")
+            )
         except (OSError, json.JSONDecodeError) as exc:
             raise InstallerError(
                 f"could not read {UPDATE_MANIFEST_REL}: {exc}"
             ) from exc
 
-        if not isinstance(data, dict) or data.get("version") != 1:
+        if not isinstance(data, dict):
             raise InstallerError(
-                f"unsupported or invalid {UPDATE_MANIFEST_REL}"
+                f"invalid {UPDATE_MANIFEST_REL}: expected a JSON object"
+            )
+
+        version = data.get("version")
+        if version != 1:
+            raise InstallerError(
+                f"unsupported {UPDATE_MANIFEST_REL} version: {version!r}"
             )
 
         managed = data.get("managed", [])
         deleted = data.get("deleted", [])
 
-        if not isinstance(managed, list) or not isinstance(deleted, list):
+        if not isinstance(managed, list):
             raise InstallerError(
-                f"invalid managed/deleted lists in {UPDATE_MANIFEST_REL}"
+                f"invalid managed list in {UPDATE_MANIFEST_REL}"
             )
 
-        def clean(values: list[object]) -> set[str]:
+        if not isinstance(deleted, list):
+            raise InstallerError(
+                f"invalid deleted list in {UPDATE_MANIFEST_REL}"
+            )
+
+        def normalize(values: list[object], field: str) -> set[str]:
             result: set[str] = set()
+
             for value in values:
-                if not isinstance(value, str) or not value:
+                if not isinstance(value, str) or not value.strip():
                     raise InstallerError(
-                        f"invalid path in {UPDATE_MANIFEST_REL}"
+                        f"invalid path in {field} of {UPDATE_MANIFEST_REL}"
                     )
-                rel = Path(value)
-                if rel.is_absolute() or ".." in rel.parts:
+
+                raw = value.strip()
+                relative = Path(raw)
+
+                if relative.is_absolute():
                     raise InstallerError(
-                        f"unsafe path in {UPDATE_MANIFEST_REL}: {value}"
+                        f"absolute path in {UPDATE_MANIFEST_REL}: {raw}"
                     )
-                if "\\" in value:
+
+                if "\\" in raw:
                     raise InstallerError(
-                        f"invalid path separator in {UPDATE_MANIFEST_REL}: {value}"
+                        f"Windows-style path in {UPDATE_MANIFEST_REL}: {raw}"
                     )
-                result.add(rel.as_posix())
+
+                if ".." in relative.parts:
+                    raise InstallerError(
+                        f"parent traversal in {UPDATE_MANIFEST_REL}: {raw}"
+                    )
+
+                normalized = relative.as_posix()
+
+                if normalized == "." or not normalized:
+                    raise InstallerError(
+                        f"invalid repository path in {UPDATE_MANIFEST_REL}: {raw}"
+                    )
+
+                result.add(normalized)
+
             return result
 
-        managed_set = clean(managed)
-        deleted_set = clean(deleted)
+        managed_set = normalize(managed, "managed")
+        deleted_set = normalize(deleted, "deleted")
 
-        # A deleted path should still be represented in managed so future
-        # updates know that the file is intentionally absent from the live
-        # baseline. Accept old manifests that forgot this and normalize them.
+        # sync.py intentionally keeps deleted paths in `managed`, but normalize
+        # older manifests that only recorded them in `deleted`.
         managed_set |= deleted_set
 
         return managed_set, deleted_set
 
     def update_destination(self, relative: str) -> Path | None:
-        """Map a repository-relative manifest path to its live-system target."""
+        """
+        Map a sync.py repository-relative path to the live-system path.
+
+        This is intentionally FILE based. The sync manifest contains files,
+        not whole directories, so an update can replace one shared file without
+        replacing the rest of a machine-specific directory.
+        """
         rel = Path(relative)
 
+        # dconf is stored as a repository file but applied through dconf load.
         if relative == "dconf/interface.ini":
             return None
 
+        # Wallfliper's JSON config lives under ~/.config while its program files
+        # live under ~/.local/share.
         if relative == "wallfliper/config.json":
             return CONFIG / "wallfliper/config.json"
 
@@ -950,13 +1013,17 @@ class Installer:
             return SHARE / rel
 
         if relative.startswith("local/bin/"):
-            return BIN / Path(relative[len("local/bin/"):])
+            return BIN / Path(
+                relative[len("local/bin/"):]
+            )
 
         if relative.startswith("Wallpapers/"):
             return HOME / Path(relative)
 
         if relative.startswith("home/"):
-            return HOME / Path(relative[len("home/"):])
+            return HOME / Path(
+                relative[len("home/"):]
+            )
 
         if relative.startswith("quickshell/my-shell/"):
             return CONFIG / Path(relative)
@@ -965,9 +1032,15 @@ class Installer:
             if relative == name or relative.startswith(name + "/"):
                 return CONFIG / rel
 
+        # Deliberately do not guess where unknown paths belong.
         return None
 
-    def manifest_file_matches_live(self, source: Path, destination: Path) -> bool:
+    def manifest_file_matches_live(
+        self,
+        source: Path,
+        destination: Path,
+    ) -> bool:
+        """Compare a repository file with its live counterpart."""
         if not self.lexists(source) or not self.lexists(destination):
             return False
 
@@ -975,81 +1048,109 @@ class Installer:
             if not source.is_symlink() or not destination.is_symlink():
                 return False
             try:
-                source_target = source.readlink()
-                destination_target = destination.readlink()
-                return source_target == destination_target
+                return source.readlink() == destination.readlink()
             except OSError:
                 return False
+
+        if source.is_dir() or destination.is_dir():
+            return False
 
         try:
             source_data = source.read_bytes().replace(
                 b"@HOME@",
-                str(HOME).encode(),
+                str(HOME).encode("utf-8"),
             )
-            dest_data = destination.read_bytes()
+            destination_data = destination.read_bytes()
         except OSError:
             return False
 
-        return source_data == dest_data
+        return source_data == destination_data
 
-    def remove_manifest_destination(self, destination: Path) -> None:
+    def remove_manifest_destination(
+        self,
+        relative: str,
+        destination: Path,
+    ) -> bool:
+        """Remove one manifest-selected file, after backing it up."""
         if not self.lexists(destination):
-            return
+            self.info(f"already absent: {relative}")
+            return False
 
-        self.say(f"removing {destination}")
+        self.say(f"removing shared file {relative}")
         self.backup_destination(destination)
 
         if self.args.dry_run:
-            return
+            return True
 
-        if destination.is_dir() and not destination.is_symlink():
-            shutil.rmtree(destination)
-        else:
-            destination.unlink()
+        # backup_destination moved the original out of the live location.
         self.changed = True
+        return True
 
     def install_manifest_updates(self) -> None:
+        """
+        Apply ONLY the files recorded by sync.py.
+
+        This function is the bridge between sync.py and install.sh:
+
+            sync.py selection
+                ↓
+            .alice-sync/update-manifest.json
+                ↓
+            installer update
+                ↓
+            exact repository files only
+
+        Nothing outside the manifest is touched here.
+        """
         assert self.dotfiles is not None
 
         managed, deleted = self.load_update_manifest()
 
         if not managed:
-            self.step("checking manifest-selected rice files")
+            self.step("checking sync.py update manifest")
             self.warn(
-                "update manifest is empty; no shared-rice files will be changed"
+                "manifest contains no shared files; existing rice will be left alone"
             )
             return
 
-        self.step(f"applying {len(managed)} manifest-managed file(s)")
+        self.step(
+            f"applying sync.py manifest ({len(managed)} shared file(s))"
+        )
 
         dconf_needed = False
         updated = 0
         unchanged = 0
         missing = 0
+        skipped_unknown = 0
 
         for relative in sorted(managed):
+            source = self.dotfiles / relative
             destination = self.update_destination(relative)
 
             if relative in deleted:
-                if destination is not None:
-                    if self.lexists(destination):
-                        self.remove_manifest_destination(destination)
-                        updated += 1
-                    else:
+                if destination is None:
+                    if relative == "dconf/interface.ini":
+                        self.info(
+                            f"deleted shared dconf file: {relative}"
+                        )
                         unchanged += 1
-                elif relative == "dconf/interface.ini":
-                    self.info(
-                        "dconf file is marked deleted; no live dconf action is needed"
-                    )
-                    unchanged += 1
+                    else:
+                        self.warn(
+                            f"cannot map deleted manifest path to live system: {relative}"
+                        )
+                        skipped_unknown += 1
+                    continue
+
+                if self.remove_manifest_destination(
+                    relative,
+                    destination,
+                ):
+                    updated += 1
                 else:
-                    self.warn(
-                        f"no live destination is known for deleted path: {relative}"
-                    )
+                    unchanged += 1
                 continue
 
             if relative == "dconf/interface.ini":
-                source = self.dotfiles / relative
                 if source.is_file():
                     dconf_needed = True
                 else:
@@ -1061,27 +1162,42 @@ class Installer:
 
             if destination is None:
                 self.warn(
-                    f"no live destination is known for {relative}; skipping"
+                    f"cannot map manifest path to live system: {relative}"
                 )
-                missing += 1
+                skipped_unknown += 1
                 continue
-
-            source = self.dotfiles / relative
 
             if not self.lexists(source):
                 self.warn(
-                    f"manifest lists {relative}, but it is missing from the repo"
+                    f"manifest lists {relative}, but the repo file is missing"
                 )
                 missing += 1
                 continue
 
-            if self.manifest_file_matches_live(source, destination):
-                self.info(f"unchanged: {relative}")
+            if source.is_dir():
+                self.warn(
+                    f"manifest entry is a directory, but sync.py manages files: {relative}"
+                )
+                skipped_unknown += 1
+                continue
+
+            if self.manifest_file_matches_live(
+                source,
+                destination,
+            ):
+                self.info(
+                    f"unchanged: {relative}"
+                )
                 unchanged += 1
                 continue
 
-            self.place(source, destination)
-            self.info(f"updated: {relative}")
+            self.place(
+                source,
+                destination,
+            )
+            self.info(
+                f"updated: {relative}"
+            )
             updated += 1
 
         if dconf_needed:
@@ -1089,8 +1205,11 @@ class Installer:
             updated += 1
 
         self.success(
-            f"manifest update complete: {updated} changed, "
-            f"{unchanged} unchanged, {missing} missing"
+            "manifest update complete: "
+            f"{updated} changed, "
+            f"{unchanged} unchanged, "
+            f"{missing} missing, "
+            f"{skipped_unknown} unmapped"
         )
 
     # --------------------------------------------------------
@@ -1604,18 +1723,21 @@ user = "greeter"
         self.logger.write(
             self.paint(
                 YELLOW + BOLD,
-                "this update only changes files recorded by sync.py.",
+                "this update follows .alice-sync/update-manifest.json.",
             )
         )
         self.info(
-            f"{len(managed)} file(s) are marked as shared/update-managed"
+            f"{len(managed)} shared file(s) are allowed to update"
         )
         if deleted:
             self.info(
-                f"{len(deleted)} file(s) are intentionally marked deleted"
+                f"{len(deleted)} shared file(s) are marked for deletion"
             )
         self.info(
-            "machine-specific files omitted from sync.py stay untouched"
+            "anything not recorded by sync.py stays exactly as it is on this computer"
+        )
+        self.info(
+            "machine-specific color/settings changes are therefore preserved"
         )
         self.info("Waybar and Fastfetch remain untouched")
         self.logger.write()
@@ -1633,6 +1755,7 @@ user = "greeter"
 
         self.summary.extend([
             "existing rice updated from sync.py's update manifest",
+            "only explicitly shared files were changed",
             "machine-specific omitted files were preserved",
         ])
 
