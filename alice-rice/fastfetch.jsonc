@@ -1,4 +1,5 @@
 {
+    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
     "logo": {
         "type": "file",
         "source": "@HOME@/.config/alice-rice/fastfetch-logo.txt",
@@ -13,95 +14,72 @@
             "4": "#67315F"
         }
     },
-
     "display": {
         "separator": "  ",
         "color": {
-            "keys": "#B63A6C",
             "title": "#EF6261",
+            "keys": "#B63A6C",
             "output": "#C8C0CC"
         },
         "key": {
-            "width": 7,
-            "type": "string"
+            "width": 6
         }
     },
-
     "modules": [
         {
             "type": "title",
             "format": "{user-name}@{host-name}"
         },
-
         {
             "type": "separator",
-            "string": "══════════════════════════",
+            "string": "──────────────────────────",
             "outputColor": "#5F295D"
         },
-
         {
             "type": "os",
             "key": "OS",
-            "keyColor": "#B63A6C",
             "format": "{name}"
         },
-
         {
             "type": "wm",
-            "key": "WM",
-            "keyColor": "#9B346B"
+            "key": "WM"
         },
-
         {
             "type": "cpu",
             "key": "CPU",
-            "keyColor": "#EF6261",
             "format": "{name}"
         },
-
         {
             "type": "gpu",
             "key": "GPU",
-            "keyColor": "#B63A6C",
             "format": "{name}"
         },
-
         {
             "type": "memory",
-            "key": "RAM",
-            "keyColor": "#9B346B"
+            "key": "RAM"
         },
-
         {
             "type": "uptime",
-            "key": "UP",
-            "keyColor": "#67315F"
+            "key": "UP"
         },
-
         {
             "type": "separator",
             "string": "──────────────────────────",
-            "outputColor": "#2C1F4E"
+            "outputColor": "#5F295D"
         },
-
         {
             "type": "shell",
-            "key": "SH",
-            "keyColor": "#5F295D"
+            "key": "SH"
         },
-
         {
             "type": "terminal",
-            "key": "TERM",
-            "keyColor": "#67315F"
+            "key": "TERM"
         },
-
         {
             "type": "separator",
             "string": "──────────────────────────",
-            "outputColor": "#2C1F4E"
+            "outputColor": "#5F295D"
         },
-
         "colors"
     ]
 }
