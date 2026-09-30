@@ -1,0 +1,1645 @@
+#!/usr/bin/env python3
+"""
+rice-colors — palette editor + wallpaper color generator for alice's niri rice
+
+A terminal UI that owns the rice's color palette and pushes it into every
+themed app: GTK 3/4 (AliceNight), qt6ct, the KDE color scheme + kdeglobals,
+kitty, niri, waybar, swaync, quickshell, fastfetch, btop and cava.
+
+  * edit any role by hex, or nudge hue / saturation / lightness with the keys
+  * generate a whole palette from your CURRENT wallpaper (awww / wallfliper)
+  * live preview, save/load presets, apply with automatic backup + undo
+
+Usage:
+    rice-colors                       open the TUI
+    rice-colors --wallpaper --apply   palette from current wallpaper, apply it
+    rice-colors --image FILE --apply  palette from a specific image
+    rice-colors --preset NAME --apply apply a saved preset ("AliceNight" = stock)
+    rice-colors --restore             undo the last apply
+    rice-colors --list-targets
+
+Needs: python-textual, python-pillow   (sudo pacman -S python-textual python-pillow)
+"""
+
+from __future__ import annotations
+
+import argparse
+import colorsys
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# ───────────────────────────── paths ─────────────────────────────
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
+DATA = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share")
+STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "rice-colors"
+CACHE = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "rice-colors"
+PRESET_DIR = CONFIG / "rice-colors" / "palettes"
+STATE_FILE = STATE / "state.json"
+BACKUPS = STATE / "backups"
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".gif"}
+
+
+def live_path(rel: str) -> Path:
+    """Map a '~'-relative path to the live location (honours XDG dirs)."""
+    if rel.startswith(".config/"):
+        return CONFIG / rel[len(".config/"):]
+    if rel.startswith(".local/share/"):
+        return DATA / rel[len(".local/share/"):]
+    return HOME / rel
+
+
+# ───────────────────────────── color math ─────────────────────────────
+
+
+def norm_hex(s: str) -> str | None:
+    s = s.strip().lstrip("#")
+    if len(s) == 3 and re.fullmatch(r"[0-9a-fA-F]{3}", s):
+        s = "".join(c * 2 for c in s)
+    if re.fullmatch(r"[0-9a-fA-F]{6}", s):
+        return "#" + s.upper()
+    return None
+
+
+def h2rgb(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def rgb2h(rgb) -> str:
+    r, g, b = (max(0, min(255, int(round(v)))) for v in rgb)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def h2hsl(h: str) -> tuple[float, float, float]:
+    r, g, b = (v / 255 for v in h2rgb(h))
+    hh, ll, ss = colorsys.rgb_to_hls(r, g, b)
+    return hh * 360.0, ss, ll
+
+
+def hsl2h(h: float, s: float, l: float) -> str:
+    r, g, b = colorsys.hls_to_rgb((h % 360.0) / 360.0, max(0.0, min(1.0, l)), max(0.0, min(1.0, s)))
+    return rgb2h((r * 255, g * 255, b * 255))
+
+
+def mix(a: str, b: str, t: float) -> str:
+    ar, br = h2rgb(a), h2rgb(b)
+    return rgb2h([ar[i] + (br[i] - ar[i]) * t for i in range(3)])
+
+
+def lum(h: str) -> float:
+    def f(c):
+        c /= 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = h2rgb(h)
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+
+
+def contrast(a: str, b: str) -> float:
+    la, lb = sorted((lum(a), lum(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def ensure_contrast(color: str, bg: str, ratio: float) -> str:
+    """Move `color`'s lightness away from `bg` until it reaches `ratio`."""
+    h, s, l = h2hsl(color)
+    up = lum(bg) < 0.4
+    for _ in range(60):
+        c = hsl2h(h, s, l)
+        if contrast(c, bg) >= ratio:
+            return c
+        l += 0.012 if up else -0.012
+        if l >= 0.98 or l <= 0.02:
+            break
+    return hsl2h(h, s, l)
+
+
+def hue_dist(a: float, b: float) -> float:
+    d = abs(a - b) % 360
+    return min(d, 360 - d)
+
+
+def hue_mix(a: float, b: float, t: float) -> float:
+    d = ((b - a + 180) % 360) - 180
+    return (a + d * t) % 360
+
+
+# ───────────────────────────── palette model ─────────────────────────────
+
+# (key, label, hint) — editable base roles
+BASE_ROLES = [
+    ("bg", "background", "window / terminal bg"),
+    ("navy", "navy", "panels, buttons"),
+    ("selection", "selection", "selected / hover bg"),
+    ("fg", "foreground", "normal text"),
+    ("fg_bright", "fg bright", "headings, highlights"),
+    ("accent", "accent", "focus ring, cursor"),
+    ("pink", "pink", "secondary accent"),
+    ("rose", "rose", "tertiary accent"),
+    ("violet", "violet", "borders, dim accents"),
+    ("purple", "purple", "dim accents"),
+    ("success", "success", "ok / positive"),
+    ("warning", "warning", "caution"),
+]
+# derived from the base roles (recomputed when a base role is edited)
+DERIVED_ROLES = [
+    ("bg_deep", "bg deep", "views, inputs"),
+    ("surface", "surface", "raised surfaces"),
+    ("border_soft", "border soft", "hairlines"),
+    ("fg_dim", "fg dim", "secondary text"),
+]
+ROLE_KEYS = [k for k, _, _ in BASE_ROLES] + [k for k, _, _ in DERIVED_ROLES]
+ROLE_LABEL = {k: (lbl, hint) for k, lbl, hint in BASE_ROLES + DERIVED_ROLES}
+
+# stock AliceNight — exactly what is hard-coded in the repo today
+STOCK_ROLES = {
+    "bg": "#09152F", "navy": "#0F183D", "selection": "#2C1F4E",
+    "fg": "#D9CFE0", "fg_bright": "#F3EAF2", "accent": "#EF6261",
+    "pink": "#B63A6C", "rose": "#9B346B", "violet": "#5F295D",
+    "purple": "#67315F", "success": "#7FA68A", "warning": "#D8B45F",
+    "bg_deep": "#0D1730", "surface": "#2F2940", "border_soft": "#2C3454",
+    "fg_dim": "#C8C0CC",
+}
+STOCK_ANSI = [
+    "#3A2850", "#B63A6C", "#7A3A70", "#EF6261", "#33468A", "#9B346B", "#79416F", "#D9CFE0",
+    "#523B69", "#FF6470", "#D24B78", "#FF746F", "#5268A8", "#B95C98", "#986090", "#F3EAF2",
+]
+ANSI_NAMES = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
+
+
+@dataclass
+class Palette:
+    name: str = "AliceNight"
+    roles: dict[str, str] = field(default_factory=lambda: dict(STOCK_ROLES))
+    ansi: list[str] = field(default_factory=lambda: list(STOCK_ANSI))
+
+    def copy(self) -> "Palette":
+        return Palette(self.name, dict(self.roles), list(self.ansi))
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "roles": self.roles, "ansi": self.ansi}
+
+    @staticmethod
+    def from_dict(d: dict) -> "Palette":
+        p = Palette()
+        p.name = str(d.get("name", "custom"))
+        for k in ROLE_KEYS:
+            v = norm_hex(str(d.get("roles", {}).get(k, ""))) or p.roles[k]
+            p.roles[k] = v
+        ans = d.get("ansi") or []
+        if len(ans) == 16:
+            p.ansi = [norm_hex(str(a)) or STOCK_ANSI[i] for i, a in enumerate(ans)]
+        return p
+
+    def __getitem__(self, k: str) -> str:
+        return self.roles[k]
+
+    # rgb-only pseudo roles that appear as rgba(...) in the GTK / waybar css
+    def shade1(self) -> str:
+        return mix(self["bg"], "#000000", 0.57)
+
+    def shade2(self) -> str:
+        return mix(self["bg"], "#000000", 0.27)
+
+
+def derive(p: Palette) -> None:
+    r = p.roles
+    r["bg_deep"] = mix(r["bg"], r["navy"], 0.30)
+    r["surface"] = mix(mix(r["selection"], r["bg"], 0.45), r["fg"], 0.05)
+    r["border_soft"] = mix(r["navy"], r["fg"], 0.15)
+    r["fg_dim"] = mix(r["fg"], r["bg"], 0.08)
+
+
+def all_colors(p: Palette) -> list[tuple[str, str]]:
+    out = [(k, p.roles[k]) for k in ROLE_KEYS]
+    out += [("shade1", p.shade1()), ("shade2", p.shade2())]
+    return out
+
+
+def finalize(p: Palette, rederive: bool = True) -> Palette:
+    """Normalise hexes and make every remap-relevant color unique.
+
+    Remapping works by exact color match, so two roles sharing one hex would
+    merge irreversibly. Duplicates get a 1-step nudge (invisible to the eye).
+    """
+    for k in ROLE_KEYS:
+        p.roles[k] = norm_hex(p.roles[k]) or STOCK_ROLES[k]
+    p.ansi = [norm_hex(a) or STOCK_ANSI[i] for i, a in enumerate(p.ansi)]
+    if rederive:
+        derive(p)
+    seen: set[tuple[int, int, int]] = set()
+    for k in ROLE_KEYS:
+        rgb = list(h2rgb(p.roles[k]))
+        for _ in range(8):
+            if tuple(rgb) not in seen:
+                break
+            rgb[2] = rgb[2] + 1 if rgb[2] < 255 else rgb[2] - 1
+        seen.add(tuple(rgb))
+        p.roles[k] = rgb2h(rgb)
+    return p
+
+
+def builtin_presets() -> dict[str, Palette]:
+    return {"AliceNight": Palette()}
+
+
+def list_presets() -> dict[str, Palette]:
+    out = builtin_presets()
+    if PRESET_DIR.is_dir():
+        for f in sorted(PRESET_DIR.glob("*.json")):
+            try:
+                p = Palette.from_dict(json.loads(f.read_text()))
+                p.name = p.name or f.stem
+                out[f.stem] = p
+            except (OSError, ValueError):
+                continue
+    return out
+
+
+def save_preset(p: Palette, name: str) -> Path:
+    name = re.sub(r"[^\w.\- ]", "", name).strip() or "custom"
+    PRESET_DIR.mkdir(parents=True, exist_ok=True)
+    q = p.copy()
+    q.name = name
+    f = PRESET_DIR / f"{name}.json"
+    f.write_text(json.dumps(q.to_dict(), indent=2))
+    return f
+
+
+# ───────────────────────────── wallpaper → palette ─────────────────────────────
+
+
+@dataclass
+class Cluster:
+    h: float
+    s: float
+    l: float
+    w: float
+    hex: str
+
+
+STYLES = ["balanced", "vibrant", "muted"]
+SAT_SCALE = {"balanced": 1.0, "vibrant": 1.25, "muted": 0.68}
+
+
+def _pil():
+    try:
+        from PIL import Image  # noqa: WPS433
+
+        return Image
+    except ImportError:
+        raise SystemExit("missing Pillow. install it with: sudo pacman -S python-pillow")
+
+
+def extract_clusters(path: Path, k: int = 16) -> list[Cluster]:
+    Image = _pil()
+    im = Image.open(path)
+    try:
+        im.draft("RGB", (400, 400))
+    except Exception:  # noqa: BLE001
+        pass
+    im = im.convert("RGB")
+    im.thumbnail((220, 220))
+    q = im.quantize(colors=k, method=Image.Quantize.MEDIANCUT)
+    pal = q.getpalette() or []
+    counts = q.getcolors() or []
+    total = sum(c for c, _ in counts) or 1
+    out = []
+    for cnt, idx in counts:
+        hx = rgb2h(pal[idx * 3: idx * 3 + 3])
+        h, s, l = h2hsl(hx)
+        out.append(Cluster(h, s, l, cnt / total, hx))
+    out.sort(key=lambda c: -c.w)
+    return out
+
+
+def build_palette(clusters: list[Cluster], style: str = "balanced", variant: int = 0,
+                  name: str = "wallpaper") -> Palette:
+    sat = SAT_SCALE.get(style, 1.0)
+    cl = max
+    chroma = [c for c in clusters if c.s >= 0.16 and 0.10 <= c.l <= 0.93]
+    chroma.sort(key=lambda c: -((c.w ** 0.55) * (0.30 + c.s) * (1.0 - abs(c.l - 0.55) * 0.8)))
+    picks: list[Cluster] = []
+    for c in chroma:
+        if all(hue_dist(c.h, p.h) >= 24 for p in picks):
+            picks.append(c)
+        if len(picks) >= 5:
+            break
+    if picks:
+        r = variant % len(picks)
+        picks = picks[r:] + picks[:r]
+    dominant = clusters[0] if clusters else Cluster(230, 0.3, 0.2, 1, "#101830")
+
+    h_acc = picks[0].h if picks else (dominant.h if dominant.s > 0.1 else 230.0)
+
+    # background hue follows the dark, weighty part of the image
+    dark = [c for c in clusters if c.l < 0.38 and c.s > 0.12]
+    if dark:
+        wsum = sum(c.w for c in dark)
+        # circular weighted mean
+        import math
+
+        x = sum(math.cos(math.radians(c.h)) * c.w for c in dark) / wsum
+        y = sum(math.sin(math.radians(c.h)) * c.w for c in dark) / wsum
+        h_bg = math.degrees(math.atan2(y, x)) % 360
+        s_bg = sum(c.s * c.w for c in dark) / wsum
+    else:
+        h_bg, s_bg = h_acc, 0.35
+    s_bg = max(0.28, min(0.62, s_bg * sat))
+
+    def pick_h(i: int, fallback_shift: float) -> float:
+        return picks[i].h if len(picks) > i else (h_acc + fallback_shift) % 360
+
+    bg = hsl2h(h_bg, s_bg, 0.105)
+    navy = hsl2h(h_bg, s_bg, 0.15)
+    selection = hsl2h(hue_mix(h_bg, pick_h(1, 22), 0.40), 0.38 * min(sat, 1.15) + 0.04, 0.24)
+
+    acc_s = max(0.48, min(0.92, (picks[0].s if picks else 0.6) * sat * 1.05))
+    acc_l = max(0.60, min(0.72, picks[0].l if picks else 0.66))
+    accent = ensure_contrast(hsl2h(h_acc, acc_s, acc_l), bg, 5.0)
+    # secondary roles keep the wallpaper's other hues, nudged toward the accent
+    # and capped in saturation so "vibrant" never turns them neon
+    pink = hsl2h(hue_mix(pick_h(1, -26), h_acc, 0.20), min(0.58, 0.50 * sat + 0.03), 0.47)
+    rose = hsl2h(hue_mix(pick_h(2, -38), h_acc, 0.20), min(0.52, 0.48 * sat + 0.03), 0.40)
+    violet = hsl2h(hue_mix(pick_h(3, -70), h_bg, 0.25), min(0.46, 0.40 * sat + 0.02), 0.27)
+    purple = hsl2h(h2hsl(violet)[0] + 5, min(0.42, 0.36 * sat + 0.02), 0.30)
+
+    fg = ensure_contrast(hsl2h(hue_mix(h_bg, h_acc, 0.25), 0.22 + 0.06 * sat, 0.86), bg, 9.0)
+    fg_bright = hsl2h(h2hsl(fg)[0], 0.30, 0.95)
+    success = hsl2h(hue_mix(140, h_acc, 0.10), 0.26 * sat + 0.03, 0.57)
+    warning = hsl2h(hue_mix(43, h_acc, 0.08), 0.58 * sat + 0.03, 0.63)
+
+    p = Palette(name=name)
+    p.roles.update(dict(
+        bg=bg, navy=navy, selection=selection, fg=fg, fg_bright=fg_bright, accent=accent,
+        pink=pink, rose=rose, violet=violet, purple=purple, success=success, warning=warning,
+    ))
+    finalize(p)
+    p.ansi = make_ansi(p, sat)
+    return p
+
+
+def make_ansi(p: Palette, sat: float = 1.0) -> list[str]:
+    """16-color terminal palette: standard hues gently tinted toward the accent."""
+    h_acc, _, _ = h2hsl(p["accent"])
+    bg, fg = p["bg"], p["fg"]
+    bases = {  # hue, saturation
+        "red": (2, 0.62), "green": (135, 0.36), "yellow": (43, 0.58),
+        "blue": (222, 0.52), "magenta": (306, 0.46), "cyan": (188, 0.44),
+    }
+    normal, bright = [], []
+    for nm in ANSI_NAMES[1:7]:
+        hh, ss = bases[nm]
+        hh = hue_mix(hh, h_acc, 0.22)
+        n = ensure_contrast(hsl2h(hh, min(0.85, ss * sat + 0.04), 0.56), bg, 4.5)
+        b = ensure_contrast(hsl2h(hh, min(0.9, ss * sat + 0.10), 0.69), bg, 6.0)
+        normal.append(n)
+        bright.append(b)
+    black = mix(bg, fg, 0.20)
+    lblack = mix(bg, fg, 0.34)
+    return [black, *normal, fg, lblack, *bright, p["fg_bright"]]
+
+
+# ───────────────────────────── wallpaper detection ─────────────────────────────
+
+
+def _run(cmd: list[str], timeout: float = 3.0) -> str:
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def video_frame(path: Path) -> Path | None:
+    if not shutil.which("ffmpeg"):
+        return None
+    CACHE.mkdir(parents=True, exist_ok=True)
+    out = CACHE / "frame.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(path), "-frames:v", "1", str(out)],
+        capture_output=True, timeout=30,
+    )
+    if not out.exists() or out.stat().st_size == 0:  # very short clip
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path), "-frames:v", "1", str(out)],
+            capture_output=True, timeout=30,
+        )
+    return out if out.exists() else None
+
+
+def detect_wallpaper() -> tuple[Path | None, str]:
+    """Best guess at the wallpaper on screen right now → (image path, source note)."""
+    # 1. wallfliper says it's a video wallpaper → theme from a frame of it
+    state = {}
+    try:
+        state = json.loads((CONFIG / "wallfliper" / "state.json").read_text())
+    except (OSError, ValueError):
+        pass
+    sp = Path(str(state.get("path", ""))).expanduser() if state.get("path") else None
+    if sp and sp.is_file() and (state.get("kind") == "video" or sp.suffix.lower() in VIDEO_EXT - {".gif"}):
+        fr = video_frame(sp)
+        if fr:
+            return fr, f"frame of video wallpaper {sp.name}"
+    # 2. what awww/swww is actually displaying
+    for tool in ("awww", "swww"):
+        if shutil.which(tool):
+            for line in _run([tool, "query"]).splitlines():
+                m = re.search(r"image:\s*(\S.*?)\s*$", line)
+                if m and Path(m.group(1)).is_file():
+                    return Path(m.group(1)), f"{tool} query"
+    # 3. wallfliper's last applied image
+    if sp and sp.is_file() and sp.suffix.lower() in IMAGE_EXT:
+        return sp, "wallfliper state"
+    # 4. newest file in ~/Wallpapers
+    wd = HOME / "Wallpapers"
+    if wd.is_dir():
+        imgs = [f for f in wd.iterdir() if f.suffix.lower() in IMAGE_EXT]
+        if imgs:
+            f = max(imgs, key=lambda x: x.stat().st_mtime)
+            return f, "newest file in ~/Wallpapers (no wallpaper daemon answered)"
+    return None, "no wallpaper found"
+
+
+def list_wallpapers() -> list[Path]:
+    wd = HOME / "Wallpapers"
+    if not wd.is_dir():
+        return []
+    return sorted(f for f in wd.iterdir() if f.suffix.lower() in IMAGE_EXT)
+
+
+# ───────────────────────────── file rewriting ─────────────────────────────
+
+HEX_RE = re.compile(r"#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?(?![0-9a-fA-F])")
+RGB_RE = re.compile(r"(rgba?\(\s*)(\d{1,3})(\s*,\s*)(\d{1,3})(\s*,\s*)(\d{1,3})")
+
+
+def build_map(old: Palette, new: Palette) -> dict[tuple[int, int, int], tuple[int, int, int]]:
+    o, n = dict(all_colors(old)), dict(all_colors(new))
+    m: dict = {}
+    for k, ov in o.items():
+        key, val = h2rgb(ov), h2rgb(n[k])
+        if key not in m:
+            m[key] = val
+    return {k: v for k, v in m.items() if k != v}
+
+
+def remap_text(text: str, m: dict) -> tuple[str, int]:
+    count = 0
+
+    def hexsub(mo):
+        nonlocal count
+        rgb = h2rgb(mo.group(1))
+        if rgb in m:
+            count += 1
+            new = "{:02x}{:02x}{:02x}".format(*m[rgb])
+            if not re.search(r"[a-f]", mo.group(1)):  # digits only — follow the alpha's case
+                low = bool(mo.group(2) and re.search(r"[a-f]", mo.group(2)))
+            else:
+                low = mo.group(1) == mo.group(1).lower()
+            if not low:
+                new = new.upper()
+            return "#" + new + (mo.group(2) or "")
+        return mo.group(0)
+
+    def rgbsub(mo):
+        nonlocal count
+        rgb = (int(mo.group(2)), int(mo.group(4)), int(mo.group(6)))
+        if rgb in m:
+            count += 1
+            n = m[rgb]
+            return f"{mo.group(1)}{n[0]}{mo.group(3)}{n[1]}{mo.group(5)}{n[2]}"
+        return mo.group(0)
+
+    text = HEX_RE.sub(hexsub, text)
+    text = RGB_RE.sub(rgbsub, text)
+    return text, count
+
+
+def score_palette(text: str, p: Palette) -> int:
+    """How many of p's colors appear in text — picks which palette a file is on."""
+    found = {h2rgb(mo.group(1)) for mo in HEX_RE.finditer(text)}
+    for mo in RGB_RE.finditer(text):
+        found.add((int(mo.group(2)), int(mo.group(4)), int(mo.group(6))))
+    return sum(1 for _, v in all_colors(p) if h2rgb(v) in found)
+
+
+def conf_set(text: str, kv: dict[str, str]) -> str:
+    """`key value` style config (kitty). Replaces existing lines, appends missing."""
+    lines = text.split("\n")
+    done = set()
+    for i, ln in enumerate(lines):
+        mo = re.match(r"^(\s*)([A-Za-z_][\w]*)(\s+)(\S.*)$", ln)
+        if mo and mo.group(2) in kv and not ln.lstrip().startswith("#"):
+            k = mo.group(2)
+            lines[i] = f"{mo.group(1)}{k}{mo.group(3)}{kv[k]}"
+            done.add(k)
+    missing = [k for k in kv if k not in done]
+    if missing:
+        if lines and lines[-1] == "":
+            lines.pop()
+        lines += ["", "# added by rice-colors"] + [f"{k} {kv[k]}" for k in missing] + [""]
+    return "\n".join(lines)
+
+
+def ini_set(text: str, section: str, kv: dict[str, str], sep: str = "=", uncomment: bool = True) -> str:
+    """Set keys inside [section] of an ini-ish file, keeping everything else."""
+    lines = text.split("\n")
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == f"[{section}]":
+            start = i
+            break
+    if start is None:
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.append(f"[{section}]")
+        start = len(lines) - 1
+        lines += [f"{k}{sep}{v}" for k, v in kv.items()]
+        return "\n".join(lines) + ("" if lines[-1] == "" else "\n")
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if re.match(r"^\s*\[.+\]\s*$", lines[j]):
+            end = j
+            break
+    for k, v in kv.items():
+        pat = re.compile(rf"^\s*{'[;#]?' if uncomment else ''}\s*{re.escape(k)}\s*=")
+        hit = None
+        for j in range(start + 1, end):
+            if pat.match(lines[j]):
+                hit = j
+                if not lines[j].lstrip().startswith((";", "#")):
+                    break  # prefer a live line over a commented one
+        if hit is not None:
+            lines[hit] = f"{k}{sep}{v}"
+        else:
+            ins = end
+            while ins > start + 1 and lines[ins - 1].strip() == "":
+                ins -= 1
+            lines.insert(ins, f"{k}{sep}{v}")
+            end += 1
+    return "\n".join(lines)
+
+
+# ── generators for files that are built from the palette rather than remapped ──
+
+
+def _rgbs(h: str) -> str:
+    return "{},{},{}".format(*h2rgb(h))
+
+
+def kde_scheme_sections(p: Palette) -> dict[str, dict[str, str]]:
+    r = p.roles
+
+    def block(bg, alt, fg=None, active=None):
+        fg = fg or r["fg"]
+        return {
+            "BackgroundAlternate": _rgbs(alt), "BackgroundNormal": _rgbs(bg),
+            "DecorationFocus": _rgbs(r["accent"]), "DecorationHover": _rgbs(r["accent"]),
+            "ForegroundActive": _rgbs(active or r["fg_bright"]),
+            "ForegroundInactive": _rgbs(mix(fg, bg, 0.38)),
+            "ForegroundLink": _rgbs(r["accent"]),
+            "ForegroundNegative": _rgbs(r["accent"]),
+            "ForegroundNeutral": _rgbs(r["warning"]),
+            "ForegroundNormal": _rgbs(fg),
+            "ForegroundPositive": _rgbs(r["success"]),
+            "ForegroundVisited": _rgbs(mix(r["rose"], r["fg"], 0.45)),
+        }
+
+    sel = block(r["selection"], mix(r["selection"], r["fg"], 0.10), r["fg_bright"])
+    win = block(r["bg"], mix(r["bg"], "#000000", 0.12))
+    return {
+        "ColorEffects:Disabled": {"Color": "128,128,128"},
+        "ColorEffects:Inactive": {
+            "ChangeSelectionColor": "true", "ChangeSelectionColorAmount": "10",
+            "Color": _rgbs(r["violet"]), "ColorAmount": "10", "ColorEffect": "0",
+            "ContrastAmount": "0.1", "IntensityAmount": "0.2",
+        },
+        "Colors:Button": block(r["navy"], r["bg_deep"]),
+        "Colors:Complementary": block(r["bg_deep"], r["bg"]),
+        "Colors:Header": block(r["bg"], mix(r["bg"], "#000000", 0.12)),
+        "Colors:Selection": sel,
+        "Colors:Tooltip": block(r["navy"], r["navy"]),
+        "Colors:View": block(r["bg_deep"], r["bg"]),
+        "Colors:Window": win,
+        "WM": {
+            "activeBackground": _rgbs(r["bg"]), "activeBlend": _rgbs(r["accent"]),
+            "activeForeground": _rgbs(r["fg"]), "inactiveBackground": _rgbs(r["bg_deep"]),
+            "inactiveBlend": _rgbs(r["violet"]), "inactiveForeground": _rgbs(r["fg_dim"]),
+        },
+    }
+
+
+def kde_scheme_text(p: Palette) -> str:
+    out = []
+    secs = kde_scheme_sections(p)
+    for name in sorted(secs):
+        out.append(f"[{name}]")
+        out += [f"{k}={v}" for k, v in sorted(secs[name].items())]
+        out.append("")
+    out += ["[General]", "ColorScheme=AliceNight", "Name=AliceNight", "shadeSortColumn=true", ""]
+    return "\n".join(out)
+
+
+def kdeglobals_text(text: str, p: Palette) -> str:
+    for name, kv in kde_scheme_sections(p).items():
+        text = ini_set(text, name, kv, uncomment=False)
+    text = ini_set(text, "General", {"ColorScheme": "AliceNight"}, uncomment=False)
+    return text if text.endswith("\n") else text + "\n"
+
+
+def qt6ct_text(p: Palette) -> str:
+    r = p.roles
+
+    def a(h, alpha="ff"):
+        return "#" + alpha + h.lstrip("#").lower()
+
+    def scheme(fg, fg_b, bg, dim=False):
+        base = r["bg_deep"]
+        if dim:  # disabled
+            fg = fg_b = r["violet"]
+        return [
+            a(fg), a(r["navy"]), a(r["surface"]), a(mix(r["navy"], r["fg"], 0.10)),
+            a(p.shade2()), a(r["border_soft"]), a(fg), a(fg_b), a(fg),
+            a(base), a(bg), a(p.shade1()),
+            a(r["accent"] if not dim else r["violet"]), a(r["bg"]),
+            a(r["accent"]), a(r["rose"]), a(r["bg"]), a(bg), a(r["navy"]), a(r["fg"]),
+            "#80" + fg.lstrip("#").lower(), a(r["accent"]),
+        ]
+
+    active = scheme(r["fg"], r["fg_bright"], r["bg"])
+    inactive = scheme(r["fg_dim"], r["fg_bright"], r["bg"])
+    disabled = scheme(r["violet"], r["violet"], r["bg_deep"], dim=True)
+    return "[ColorScheme]\nactive_colors=%s\n\ninactive_colors=%s\n\ndisabled_colors=%s\n" % (
+        ",".join(active), ",".join(inactive), ",".join(disabled))
+
+
+def btop_theme_text(p: Palette) -> str:
+    r = p.roles
+    g = lambda a, b, c: (a, b, c)  # noqa: E731
+    lines = {
+        "main_bg": r["bg"], "main_fg": r["fg"], "title": r["fg_bright"], "hi_fg": r["accent"],
+        "selected_bg": r["selection"], "selected_fg": r["accent"], "inactive_fg": r["violet"],
+        "graph_text": r["fg_dim"], "meter_bg": r["surface"], "proc_misc": r["pink"],
+        "cpu_box": r["violet"], "mem_box": r["violet"], "net_box": r["violet"], "proc_box": r["violet"],
+        "div_line": r["border_soft"],
+    }
+    grads = {
+        "temp": g(r["success"], r["warning"], r["accent"]),
+        "cpu": g(r["rose"], r["pink"], r["accent"]),
+        "free": g(r["violet"], r["purple"], r["pink"]),
+        "cached": g(r["violet"], r["rose"], r["pink"]),
+        "available": g(r["purple"], r["rose"], r["accent"]),
+        "used": g(r["rose"], r["pink"], r["accent"]),
+        "download": g(r["violet"], r["pink"], r["accent"]),
+        "upload": g(r["purple"], r["rose"], r["accent"]),
+        "process": g(r["violet"], r["rose"], r["accent"]),
+    }
+    out = ["# generated by rice-colors"]
+    out += [f'theme[{k}]="{v}"' for k, v in lines.items()]
+    for k, (s, m_, e) in grads.items():
+        out += [f'theme[{k}_start]="{s}"', f'theme[{k}_mid]="{m_}"', f'theme[{k}_end]="{e}"']
+    return "\n".join(out) + "\n"
+
+
+def kitty_kv(p: Palette) -> dict[str, str]:
+    r = p.roles
+    kv = {
+        "background": r["bg"], "foreground": r["fg"],
+        "selection_background": r["selection"], "selection_foreground": r["accent"],
+        "cursor": r["accent"], "cursor_text_color": r["bg"], "cursor_trail_color": r["accent"],
+        "active_border_color": r["accent"], "inactive_border_color": r["selection"],
+        "bell_border_color": r["pink"], "active_tab_foreground": r["accent"],
+        "active_tab_background": r["bg_deep"], "inactive_tab_foreground": r["rose"],
+        "inactive_tab_background": r["bg"], "tab_bar_background": r["bg"],
+    }
+    for i, c in enumerate(p.ansi):
+        kv[f"color{i}"] = c
+    return kv
+
+
+def cava_kv(p: Palette) -> dict[str, str]:
+    r = p.roles
+    stops = [r["violet"], r["purple"], r["rose"], r["pink"], r["accent"]]
+    cols = []
+    for i in range(8):  # 8 evenly spaced samples along violet→…→accent
+        t = i / 7 * (len(stops) - 1)
+        lo = min(int(t), len(stops) - 2)
+        cols.append(mix(stops[lo], stops[lo + 1], t - lo))
+    kv = {"gradient": "1"}
+    kv.update({f"gradient_color_{i + 1}": f"'{c.lower()}'" for i, c in enumerate(cols)})
+    return kv
+
+
+# ───────────────────────────── targets ─────────────────────────────
+
+
+@dataclass
+class FileSpec:
+    live: str            # path relative to $HOME (".config/..." honours XDG)
+    repo: str            # path relative to the dotfiles repo root
+    kind: str = "remap"  # remap | kitty | qt6ct | kde_scheme | kdeglobals | btop_theme | btop_conf | cava
+    create: bool = False
+
+
+@dataclass
+class Target:
+    key: str
+    label: str
+    files: list[FileSpec]
+    hooks: list[str] = field(default_factory=list)
+
+
+GTK_THEME = ".local/share/themes/AliceNight"
+TARGETS: list[Target] = [
+    Target("gtk", "GTK 3 + 4 (AliceNight theme)", [
+        FileSpec(f"{GTK_THEME}/gtk-3.0/gtk.css", "home/.local/share/themes/AliceNight/gtk-3.0/gtk.css"),
+        FileSpec(f"{GTK_THEME}/gtk-3.0/gtk-dark.css", "home/.local/share/themes/AliceNight/gtk-3.0/gtk-dark.css"),
+        FileSpec(f"{GTK_THEME}/gtk-4.0/gtk.css", "home/.local/share/themes/AliceNight/gtk-4.0/gtk.css"),
+        FileSpec(f"{GTK_THEME}/gtk-4.0/gtk-dark.css", "home/.local/share/themes/AliceNight/gtk-4.0/gtk-dark.css"),
+        FileSpec(".config/gtk-4.0/gtk.css", "gtk-4.0/gtk.css"),
+    ], ["gtk"]),
+    Target("qt6ct", "Qt apps (qt6ct palette)", [
+        FileSpec(".config/qt6ct/colors/AliceNight.conf", "qt6ct/colors/AliceNight.conf", "qt6ct", True),
+    ]),
+    Target("kde", "KDE color scheme + kdeglobals", [
+        FileSpec(".local/share/color-schemes/AliceNight.colors",
+                 "home/.local/share/color-schemes/AliceNight.colors", "kde_scheme", True),
+        FileSpec(".config/kdeglobals", "home/.config/kdeglobals", "kdeglobals", True),
+    ]),
+    Target("kitty", "kitty terminal (+ ANSI 16)", [
+        FileSpec(".config/alice-rice/kitty.conf", "alice-rice/kitty.conf", "kitty"),
+    ], ["kitty"]),
+    Target("niri", "niri (focus ring, shadows)", [
+        FileSpec(".config/niri/parts/colors.kdl", "niri/parts/colors.kdl"),
+    ], ["niri"]),
+    Target("waybar", "waybar", [
+        FileSpec(".config/waybar/niri-left.css", "waybar/niri-left.css"),
+    ], ["waybar"]),
+    Target("swaync", "swaync notifications", [
+        FileSpec(".config/swaync/style.css", "swaync/style.css"),
+    ], ["swaync"]),
+    Target("quickshell", "quickshell (bar + launcher)", [
+        FileSpec(".config/quickshell/my-shell/TopBar.qml", "quickshell/my-shell/TopBar.qml"),
+        FileSpec(".config/quickshell/my-shell/Launcher.qml", "quickshell/my-shell/Launcher.qml"),
+        FileSpec(".config/quickshell/my-shell/TimeWidget.qml", "quickshell/my-shell/TimeWidget.qml"),
+    ]),
+    Target("fastfetch", "fastfetch", [
+        FileSpec(".config/alice-rice/fastfetch.jsonc", "alice-rice/fastfetch.jsonc"),
+    ]),
+    Target("btop", "btop theme", [
+        FileSpec(".config/btop/themes/alice-rice.theme", "btop/themes/alice-rice.theme", "btop_theme", True),
+        FileSpec(".config/btop/btop.conf", "btop/btop.conf", "btop_conf"),
+    ], ["btop"]),
+    Target("cava", "cava gradient", [
+        FileSpec(".config/cava/config", "cava/config", "cava"),
+    ], ["cava"]),
+]
+TARGETS.append(Target("auto", "auto-found files (anything else using the palette)", []))
+TARGET_BY_KEY = {t.key: t for t in TARGETS}
+
+DISCOVER_EXT = {"", ".css", ".scss", ".qml", ".kdl", ".conf", ".toml", ".ini", ".jsonc", ".json",
+                ".theme", ".rasi", ".lua", ".yml", ".yaml", ".colors", ".rc", ".vibe"}
+DISCOVER_SKIP = {".git", "wallfliper", "rice-colors", "gtk-3.0/assets", "gtk-4.0/assets", "node_modules",
+                 "__pycache__", "Wallpapers"}
+
+
+def discover_files(covered: set[Path], pals: list[Palette]) -> list[FileSpec]:
+    """Find other files that clearly use the palette (>=3 of its colors), so the
+    app keeps working when the dotfiles are reorganised or new apps get riced."""
+    roots = [(CONFIG, ""), (DATA / "themes", "home/.local/share/themes"),
+             (DATA / "color-schemes", "home/.local/share/color-schemes")]
+    out: list[FileSpec] = []
+    for root, _ in roots:
+        if not root.is_dir():
+            continue
+        for dp, dns, fns in os.walk(root):
+            rel_dir = Path(dp).relative_to(root).as_posix()
+            dns[:] = [d for d in dns if d not in DISCOVER_SKIP
+                      and f"{rel_dir}/{d}".lstrip("./") not in DISCOVER_SKIP]
+            for fn in fns:
+                f = Path(dp) / fn
+                if f.suffix.lower() not in DISCOVER_EXT or f.resolve() in covered:
+                    continue
+                try:
+                    if f.stat().st_size > 600_000:
+                        continue
+                    text = f.read_text(errors="strict")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if max(score_palette(text, q) for q in pals) >= 3:
+                    out.append(FileSpec(str(f.relative_to(HOME)) if f.is_relative_to(HOME) else str(f), "", "remap"))
+    return out
+
+
+def repo_rel(live: Path) -> str:
+    """Where a live file sits inside the dotfiles repo (mirrors the installer layout)."""
+    if live.is_relative_to(CONFIG):
+        return live.relative_to(CONFIG).as_posix()
+    if live.is_relative_to(DATA):
+        return "home/.local/share/" + live.relative_to(DATA).as_posix()
+    return live.relative_to(HOME).as_posix()
+
+
+def find_repo(hint: str | None = None) -> Path | None:
+    here = Path(__file__).resolve()
+    cands = [hint, os.environ.get("RICE_REPO"), str(here.parents[2]) if len(here.parents) > 2 else None,
+             os.popen("git -C %s rev-parse --show-toplevel 2>/dev/null" % str(here.parent)).read().strip() or None, str(HOME / "Projects/niri-dots-clean"),
+             str(HOME / "niri-dots-clean"), str(HOME / "dotfiles"), str(HOME / ".dotfiles")]
+    for c in cands:
+        if c:
+            p = Path(c).expanduser()
+            if (p / "install.sh").is_file() and (p / "niri").is_dir():
+                return p
+    return None
+
+
+# ───────────────────────────── state / backup ─────────────────────────────
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(st: dict) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=2))
+    os.replace(tmp, STATE_FILE)
+
+
+def known_palettes(st: dict) -> list[Palette]:
+    out = [Palette()]
+    for d in st.get("history", []):
+        try:
+            out.append(Palette.from_dict(d))
+        except Exception:  # noqa: BLE001
+            pass
+    if st.get("applied"):
+        out.append(Palette.from_dict(st["applied"]))
+    return out
+
+
+def atomic_write(path: Path, text: str) -> None:
+    real = path.resolve() if path.is_symlink() else path
+    real.parent.mkdir(parents=True, exist_ok=True)
+    mode = real.stat().st_mode & 0o7777 if real.exists() else 0o644
+    tmp = real.with_name(f".{real.name}.rice-tmp")
+    tmp.write_text(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, real)
+
+
+@dataclass
+class Result:
+    target: str
+    path: str
+    status: str   # ok | unchanged | missing | error
+    detail: str = ""
+
+
+def render_file(spec: FileSpec, text: str | None, pal: Palette, st_pals: list[Palette]) -> tuple[str | None, str]:
+    """Return (new text | None, note)."""
+    k = spec.kind
+    if k == "qt6ct":
+        return qt6ct_text(pal), "generated"
+    if k == "kde_scheme":
+        return kde_scheme_text(pal), "generated"
+    if k == "btop_theme":
+        return btop_theme_text(pal), "generated"
+    if text is None:
+        return None, "missing"
+    if k == "kdeglobals":
+        return kdeglobals_text(text, pal), "merged"
+    if k == "btop_conf":
+        new = re.sub(r'(?m)^(\s*color_theme\s*=\s*).*$', r'\1"alice-rice"', text)
+        return new, "color_theme = alice-rice"
+    if k == "kitty":
+        return conf_set(text, kitty_kv(pal)), "keys set"
+    if k == "cava":
+        return ini_set(text, "color", cava_kv(pal)), "gradient set"
+    # remap: pick the palette this file currently looks like
+    best = max(st_pals, key=lambda q: score_palette(text, q))
+    if score_palette(text, best) == 0:
+        return text, "no known palette colors found"
+    new, n = remap_text(text, build_map(best, pal))
+    return new, f"{n} colors"
+
+
+def run_hooks(keys: set[str], log) -> None:
+    def sh(cmd: list[str], note: str) -> None:
+        if not shutil.which(cmd[0]):
+            return
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=6)
+            if r.returncode == 0:
+                log(f"reload: {note}")
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    if "waybar" in keys:
+        sh(["pkill", "-SIGUSR2", "-x", "waybar"], "waybar")
+    if "swaync" in keys:
+        sh(["swaync-client", "-rs"], "swaync css")
+    if "kitty" in keys:
+        sh(["pkill", "-SIGUSR1", "-x", "kitty"], "kitty (all windows)")
+    if "cava" in keys:
+        sh(["pkill", "-SIGUSR2", "-x", "cava"], "cava")
+    if "btop" in keys:
+        sh(["pkill", "-SIGUSR2", "-x", "btop"], "btop")
+    if "niri" in keys:
+        sh(["niri", "msg", "action", "load-config-file"], "niri config")
+    if "gtk" in keys and shutil.which("gsettings"):
+        cur = _run(["gsettings", "get", "org.gnome.desktop.interface", "gtk-theme"]).strip().strip("'")
+        if cur:
+            other = "Adwaita" if cur != "Adwaita" else "AliceNight"
+            subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", "gtk-theme", other], capture_output=True)
+            time.sleep(0.25)
+            subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", "gtk-theme", cur], capture_output=True)
+            log("reload: GTK theme re-set (open GTK apps refresh)")
+
+
+def apply_palette(pal: Palette, target_keys: list[str], repo: Path | None = None, dry_run: bool = False,
+                  reload: bool = True, log=print) -> list[Result]:
+    pal = finalize(pal.copy(), rederive=False)
+    st = load_state()
+    st_pals = known_palettes(st)
+    roots: list[tuple[str, Path | None]] = [("live", None)]
+    if repo:
+        roots.append(("repo", repo))
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    bdir = BACKUPS / stamp
+    manifest = {"files": [], "prev_applied": st.get("applied")}
+    results: list[Result] = []
+    seen: set[Path] = set()
+    touched: set[str] = set()
+
+    if "auto" in target_keys:
+        covered = {(live_path(sp.live)).resolve() for t in TARGETS for sp in t.files}
+        TARGET_BY_KEY["auto"].files = discover_files(covered, st_pals)
+        for sp in TARGET_BY_KEY["auto"].files:
+            sp.repo = repo_rel(live_path(sp.live))
+    for key in target_keys:
+        tgt = TARGET_BY_KEY.get(key)
+        if not tgt:
+            continue
+        for root_name, root in roots:
+            for spec in tgt.files:
+                path = live_path(spec.live) if root is None else root / spec.repo
+                shown = ("~/" + str(path.relative_to(HOME))) if path.is_relative_to(HOME) else str(path)
+                if root is not None:
+                    shown = f"[repo] {spec.repo}"
+                real = path.resolve()
+                if real in seen:  # e.g. live file is a symlink into the repo
+                    continue
+                exists = path.is_file()
+                text = path.read_text(errors="replace") if exists else None
+                if not exists and not spec.create:
+                    results.append(Result(key, shown, "missing"))
+                    continue
+                try:
+                    new, note = render_file(spec, text, pal, st_pals)
+                except Exception as exc:  # noqa: BLE001
+                    results.append(Result(key, shown, "error", str(exc)))
+                    continue
+                if new is None or new == text:
+                    results.append(Result(key, shown, "unchanged", note))
+                    seen.add(real)
+                    continue
+                if not dry_run:
+                    if exists:
+                        bpath = bdir / str(real).lstrip("/")
+                        bpath.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(real, bpath)
+                        manifest["files"].append({"path": str(real), "backup": str(bpath)})
+                    else:
+                        manifest["files"].append({"path": str(real), "backup": None})
+                    atomic_write(path, new)
+                    touched.add(key)
+                seen.add(real)
+                results.append(Result(key, shown, "ok", note))
+
+    if not dry_run and touched:
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        hist = st.get("history", [])
+        if st.get("applied"):
+            hist.append(st["applied"])
+        # keep the history small and unique
+        uniq, sig = [], set()
+        for d in hist[-30:]:
+            s = json.dumps(d.get("roles", {}), sort_keys=True)
+            if s not in sig:
+                sig.add(s)
+                uniq.append(d)
+        st["history"] = uniq[-12:]
+        st["applied"] = pal.to_dict()
+        save_state(st)
+        # prune old backups
+        dirs = sorted(d for d in BACKUPS.iterdir() if d.is_dir()) if BACKUPS.is_dir() else []
+        for d in dirs[:-15]:
+            shutil.rmtree(d, ignore_errors=True)
+        if reload:
+            hk = {h for k in touched for h in TARGET_BY_KEY[k].hooks}
+            run_hooks(hk, log)
+    return results
+
+
+def restore_last(reload: bool = True, log=print) -> str:
+    dirs = sorted(d for d in BACKUPS.iterdir() if d.is_dir() and (d / "manifest.json").exists()) \
+        if BACKUPS.is_dir() else []
+    if not dirs:
+        return "nothing to restore"
+    d = dirs[-1]
+    man = json.loads((d / "manifest.json").read_text())
+    n = 0
+    for f in man["files"]:
+        p = Path(f["path"])
+        if f["backup"] and Path(f["backup"]).exists():
+            shutil.copy2(f["backup"], p)
+            n += 1
+        elif f["backup"] is None and p.exists():
+            p.unlink()
+            n += 1
+    st = load_state()
+    if man.get("prev_applied"):
+        st["applied"] = man["prev_applied"]
+    else:
+        st.pop("applied", None)
+    save_state(st)
+    shutil.rmtree(d, ignore_errors=True)
+    if reload:
+        run_hooks({"waybar", "swaync", "kitty", "cava", "btop", "niri", "gtk"}, log)
+    return f"restored {n} files from {d.name}"
+
+
+# ───────────────────────────── CLI ─────────────────────────────
+
+
+def cli_palette(args) -> Palette | None:
+    if args.preset:
+        pres = list_presets()
+        if args.preset not in pres:
+            raise SystemExit(f"no preset '{args.preset}'. have: {', '.join(pres)}")
+        return finalize(pres[args.preset].copy(), rederive=False)
+    if args.wallpaper or args.image:
+        if args.image:
+            img = Path(args.image).expanduser()
+            note = "given image"
+        else:
+            img, note = detect_wallpaper()
+        if not img or not img.is_file():
+            raise SystemExit(f"could not find a wallpaper ({note})")
+        if img.suffix.lower() in VIDEO_EXT - {".gif"}:
+            img = video_frame(img) or img
+        print(f"wallpaper: {img}  ({note})")
+        return build_palette(extract_clusters(img), args.style, args.variant, name=img.stem)
+    return None
+
+
+def main_cli(args) -> int:
+    if args.list_targets:
+        for t in TARGETS:
+            print(f"{t.key:11} {t.label}")
+        return 0
+    if args.restore:
+        print(restore_last(not args.no_reload))
+        return 0
+    pal = cli_palette(args)
+    if pal is None:
+        return 1
+    for k, lbl, _ in BASE_ROLES + DERIVED_ROLES:
+        print(f"  {lbl:12} {pal[k]}")
+    if args.apply:
+        keys = args.targets.split(",") if args.targets else [t.key for t in TARGETS]
+        bad = [k for k in keys if k not in TARGET_BY_KEY]
+        if bad:
+            raise SystemExit(f"unknown target(s): {', '.join(bad)}  (see --list-targets)")
+        repo = find_repo(args.repo) if (args.repo or args.with_repo) else None
+        if (args.repo or args.with_repo) and not repo:
+            print("warning: dotfiles repo not found; only updating live files")
+        for r in apply_palette(pal, keys, repo, args.dry_run, not args.no_reload):
+            print(f"  {r.status:9} {r.target:10} {r.path}  {r.detail}")
+        if args.dry_run:
+            print("(dry run — nothing written)")
+    return 0
+
+
+# ───────────────────────────── TUI ─────────────────────────────
+
+
+def run_tui(args) -> int:
+    try:
+        from rich.text import Text
+        from textual import on, work
+        from textual.app import App, ComposeResult
+        from textual.binding import Binding
+        from textual.containers import Horizontal, Vertical, VerticalScroll
+        from textual.widgets import (Button, DataTable, Footer, Header, Input, Label, RichLog,
+                                     SelectionList, Static, TabbedContent, TabPane)
+        from textual.widgets.selection_list import Selection
+    except ImportError:
+        print("missing textual. install it with: sudo pacman -S python-textual python-pillow")
+        return 1
+
+    def sw(h: str, n: int = 3) -> Text:
+        return Text("█" * n, style=h)
+
+    class RoleTable(DataTable):
+        BINDINGS = [
+            Binding("j", "cursor_down", "down", show=False),
+            Binding("k", "cursor_up", "up", show=False),
+            Binding("h", "nudge('h',-6)", "hue−", key_display="h/H"),
+            Binding("H", "nudge('h',6)", "hue+", show=False),
+            Binding("s", "nudge('s',-0.04)", "sat−", key_display="s/S"),
+            Binding("S", "nudge('s',0.04)", "sat+", show=False),
+            Binding("l", "nudge('l',-0.02)", "light−", key_display="l/L"),
+            Binding("L", "nudge('l',0.02)", "light+", show=False),
+            Binding("e", "edit", "edit hex"),
+            Binding("x", "reset_role", "reset role"),
+        ]
+
+        def action_nudge(self, ch: str, amt: float) -> None:
+            self.app.nudge(ch, amt)
+
+        def action_edit(self) -> None:
+            self.app.query_one("#hex", Input).focus()
+
+        def action_reset_role(self) -> None:
+            self.app.reset_role()
+
+    class RiceColors(App):
+        TITLE = "rice-colors"
+        SUB_TITLE = "alice's palette studio"
+        CSS = """
+        Screen { background: $surface; }
+        #roles { width: 46; height: 1fr; border: round $primary 50%; }
+        #right { width: 1fr; padding: 0 1; }
+        #preview { height: auto; padding: 0 0 1 0; }
+        #editbar { height: 3; }
+        #hex { width: 16; }
+        #info { width: 1fr; padding: 1 1; }
+        #presets { height: 3; }
+        #preset-name { width: 24; }
+        #wp-info { padding: 1 1; height: auto; }
+        #wp-path { margin: 0 1; }
+        .buttons { height: 3; margin: 0 1; }
+        .buttons Button { margin-right: 1; }
+        #wp-list { height: 1fr; margin: 0 1; border: round $primary 50%; }
+        #clusters { padding: 0 2; height: auto; }
+        #targets { width: 44; height: 1fr; border: round $primary 50%; }
+        #apply-side { width: 1fr; padding: 0 1; }
+        #log { height: 1fr; border: round $primary 50%; }
+        #status { dock: bottom; height: 1; padding: 0 1; background: $boost; }
+        """
+        BINDINGS = [
+            Binding("q", "quit", "quit"),
+            Binding("1", "tab('palette')", "palette"),
+            Binding("2", "tab('wallpaper')", "wallpaper"),
+            Binding("3", "tab('apply')", "apply"),
+            Binding("g", "generate", "from wallpaper"),
+            Binding("n", "next_variant", "next variant"),
+            Binding("A", "apply_now", "APPLY"),
+            Binding("u", "undo", "undo last apply"),
+        ]
+
+        def __init__(self) -> None:
+            super().__init__()
+            st = load_state()
+            base = Palette.from_dict(st["applied"]) if st.get("applied") else Palette()
+            self.pal: Palette = finalize(base.copy(), rederive=False)
+            self.applied: Palette = self.pal.copy()
+            self.style_i = 0
+            self.variant = 0
+            self.img: Path | None = None
+            self.repo = find_repo(args.repo)
+            self.busy = False
+
+        # ── layout
+        def compose(self) -> ComposeResult:
+            yield Header()
+            with TabbedContent(initial="palette"):
+                with TabPane("1 Palette", id="palette"):
+                    with Horizontal():
+                        yield RoleTable(id="roles", cursor_type="row", zebra_stripes=True)
+                        with Vertical(id="right"):
+                            yield Static(id="preview")
+                            with Horizontal(id="editbar"):
+                                yield Input(placeholder="#RRGGBB", id="hex", max_length=7)
+                                yield Static(id="info")
+                            with Horizontal(id="presets"):
+                                yield Input(placeholder="preset name", id="preset-name")
+                                yield Button("save preset", id="save-preset")
+                                yield Button("next preset", id="next-preset")
+                                yield Button("reset all", id="reset-all")
+                with TabPane("2 Wallpaper", id="wallpaper"):
+                    with VerticalScroll():
+                        yield Static(id="wp-info")
+                        yield Input(placeholder="image path (Enter to load)", id="wp-path")
+                        with Horizontal(classes="buttons"):
+                            yield Button("use current wallpaper", id="wp-current", variant="primary")
+                            yield Button("generate palette", id="wp-gen", variant="success")
+                            yield Button("style: balanced", id="wp-style")
+                            yield Button("next variant", id="wp-variant")
+                        yield Static(id="clusters")
+                        yield DataTable(id="wp-list", cursor_type="row")
+                with TabPane("3 Apply", id="apply"):
+                    with Horizontal():
+                        yield SelectionList(*[Selection(t.label, t.key, True) for t in TARGETS], id="targets")
+                        with Vertical(id="apply-side"):
+                            yield Static(id="apply-info")
+                            with Horizontal(classes="buttons"):
+                                yield Button("APPLY", id="do-apply", variant="success")
+                                yield Button("dry run", id="do-dry")
+                                yield Button("undo last", id="do-undo", variant="warning")
+                            with Horizontal(classes="buttons"):
+                                yield Button("repo: off", id="tog-repo")
+                                yield Button("reload: on", id="tog-reload")
+                            yield RichLog(id="log", wrap=True, markup=False, highlight=False)
+            yield Static(id="status")
+            yield Footer()
+
+        # ── setup
+        def on_mount(self) -> None:
+            self.do_reload = True
+            self.use_repo = False
+            t = self.query_one("#roles", RoleTable)
+            t.add_columns("role", "", "hex", "cr")
+            self.fill_roles()
+            wl = self.query_one("#wp-list", DataTable)
+            wl.add_columns("wallpapers in ~/Wallpapers")
+            for f in list_wallpapers():
+                wl.add_row(f.name, key=str(f))
+            self.refresh_all()
+            self.status("ready — h/s/l nudge the selected color, e edits the hex, g pulls a palette from your wallpaper")
+            t.focus()
+            self.query_one("#log", RichLog).write("nothing applied this session yet")
+
+        def status(self, msg: str) -> None:
+            self.query_one("#status", Static).update(msg)
+
+        # ── palette table
+        def row_keys(self) -> list[str]:
+            return ROLE_KEYS + [f"ansi:{i}" for i in range(16)]
+
+        def get_color(self, key: str) -> str:
+            return self.pal.ansi[int(key[5:])] if key.startswith("ansi:") else self.pal.roles[key]
+
+        def set_color(self, key: str, val: str) -> None:
+            if key.startswith("ansi:"):
+                self.pal.ansi[int(key[5:])] = val
+            else:
+                self.pal.roles[key] = val
+                if key in dict((k, 0) for k, _, _ in BASE_ROLES):
+                    derive(self.pal)
+
+        def label_for(self, key: str) -> str:
+            if key.startswith("ansi:"):
+                i = int(key[5:])
+                return f"ansi {i:>2} {'bright ' if i >= 8 else ''}{ANSI_NAMES[i % 8]}"
+            lbl = ROLE_LABEL[key][0]
+            return lbl if key in dict((k, 0) for k, _, _ in BASE_ROLES) else f"· {lbl}"
+
+        def fill_roles(self) -> None:
+            t = self.query_one("#roles", RoleTable)
+            for k in self.row_keys():
+                c = self.get_color(k)
+                t.add_row(self.label_for(k), sw(c), c, f"{contrast(c, self.pal['bg']):.1f}", key=k)
+
+        def refresh_roles(self) -> None:
+            t = self.query_one("#roles", RoleTable)
+            for k in self.row_keys():
+                c = self.get_color(k)
+                t.update_cell(k, t.ordered_columns[1].key, sw(c))
+                t.update_cell(k, t.ordered_columns[2].key, c)
+                t.update_cell(k, t.ordered_columns[3].key, f"{contrast(c, self.pal['bg']):.1f}")
+
+        def cur_key(self) -> str | None:
+            t = self.query_one("#roles", RoleTable)
+            if t.row_count == 0:
+                return None
+            try:
+                return t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
+            except Exception:  # noqa: BLE001
+                return None
+
+        def refresh_all(self) -> None:
+            self.refresh_roles()
+            self.refresh_preview()
+            self.refresh_info()
+            dirty = json.dumps(self.pal.roles, sort_keys=True) != json.dumps(self.applied.roles, sort_keys=True) \
+                or self.pal.ansi != self.applied.ansi
+            self.sub_title = f"{self.pal.name}{' *' if dirty else ''}  ·  A applies"
+            self.query_one("#apply-info", Static).update(
+                f"palette: {self.pal.name}{'  (unsaved changes)' if dirty else ''}\n"
+                f"dotfiles repo: {self.repo if self.repo else 'not found (set RICE_REPO or --repo)'}\n"
+                "APPLY backs up every file first — 'undo last' brings them back."
+            )
+
+        def refresh_info(self) -> None:
+            k = self.cur_key()
+            if not k:
+                return
+            c = self.get_color(k)
+            h, s, l = h2hsl(c)
+            lbl, hint = (self.label_for(k), "") if k.startswith("ansi:") else ROLE_LABEL[k]
+            self.query_one("#info", Static).update(
+                f"{lbl}  {hint}\nH {h:5.1f}°  S {s * 100:3.0f}%  L {l * 100:3.0f}%   "
+                f"contrast vs bg {contrast(c, self.pal['bg']):.1f}:1")
+            inp = self.query_one("#hex", Input)
+            if not inp.has_focus:
+                inp.value = c
+
+        def refresh_preview(self) -> None:
+            r = self.pal.roles
+            W = 52
+            T = Text()
+
+            def line(segs, bg, pad=True):
+                used = 0
+                for txt, fg, *rest in segs:
+                    st = f"{fg} on {rest[0] if rest else bg}" + (" bold" if len(rest) > 1 else "")
+                    T.append(txt, style=st)
+                    used += len(txt)
+                if pad:
+                    T.append(" " * max(0, W - used), style=f"on {bg}")
+                T.append("\n")
+
+            # top bar
+            line([("  ", r["fg"]), (" 1 ", r["accent"], r["selection"]), (" 2 ", r["fg_dim"]),
+                  (" 3 ", r["fg_dim"]), ("      alice-rice         ", r["fg"]),
+                  (" 100% ", r["success"]), (" 12:30 ", r["fg_bright"])], r["navy"])
+            # terminal
+            line([(" ~/rice ", r["pink"]), ("❯ ", r["accent"]), ("rice-colors --wallpaper", r["fg"])], r["bg"])
+            line([(" selected line looks like this        ", r["fg_bright"], r["selection"])], r["bg"])
+            line([(" ok ", r["success"]), ("all good   ", r["fg"]), (" warn ", r["warning"]),
+                  ("careful   ", r["fg"]), (" err ", r["accent"]), ("uh oh", r["fg"])], r["bg"])
+            line([(" dim text · borders · ", r["fg_dim"]), ("violet", r["violet"]), (" purple", r["purple"]),
+                  (" rose", r["rose"]), (" pink", r["pink"])], r["bg"])
+            ans = [(" ", r["fg"])]
+            for i in range(8):
+                ans.append(("██", self.pal.ansi[i]))
+            ans.append(("  ", r["fg"]))
+            for i in range(8, 16):
+                ans.append(("██", self.pal.ansi[i]))
+            line(ans, r["bg"])
+            # card + buttons
+            line([(" ", r["fg"]), (" Notification ", r["fg_bright"], r["surface"], 1),
+                  ("  ", r["fg"]), (" Accent ", r["bg"], r["accent"], 1), (" ", r["fg"]),
+                  (" Pink ", r["fg_bright"], r["pink"], 1)], r["bg_deep"])
+            self.query_one("#preview", Static).update(T)
+
+        # ── events
+        @on(DataTable.RowHighlighted, "#roles")
+        def _hl(self, _e) -> None:
+            self.refresh_info()
+
+        @on(Input.Submitted, "#hex")
+        def _hex_submit(self, e: Input.Submitted) -> None:
+            k = self.cur_key()
+            v = norm_hex(e.value)
+            if not k or not v:
+                self.status(f"'{e.value}' isn't a hex color — try #RRGGBB")
+                return
+            self.set_color(k, v)
+            self.refresh_all()
+            self.query_one("#roles", RoleTable).focus()
+            self.status(f"{self.label_for(k)} → {v}")
+
+        @on(Input.Submitted, "#wp-path")
+        def _wp_path(self, e: Input.Submitted) -> None:
+            self.load_image(Path(e.value).expanduser())
+
+        @on(DataTable.RowSelected, "#wp-list")
+        def _wp_pick(self, e: DataTable.RowSelected) -> None:
+            self.load_image(Path(e.row_key.value))
+            self.generate()
+
+        @on(Button.Pressed)
+        def _btn(self, e: Button.Pressed) -> None:
+            bid = e.button.id
+            if bid == "save-preset":
+                nm = self.query_one("#preset-name", Input).value.strip() or self.pal.name
+                f = save_preset(self.pal, nm)
+                self.pal.name = f.stem
+                self.refresh_all()
+                self.status(f"saved preset → {f}")
+            elif bid == "next-preset":
+                pres = list(list_presets().items())
+                names = [n for n, _ in pres]
+                i = (names.index(self.pal.name) + 1) % len(names) if self.pal.name in names else 0
+                self.pal = finalize(pres[i][1].copy(), rederive=False)
+                self.pal.name = names[i]
+                self.refresh_all()
+                self.status(f"loaded preset {names[i]}")
+            elif bid == "reset-all":
+                self.pal = Palette()
+                self.refresh_all()
+                self.status("reset to stock AliceNight")
+            elif bid == "wp-current":
+                self.use_current()
+            elif bid == "wp-gen":
+                self.generate()
+            elif bid == "wp-style":
+                self.style_i = (self.style_i + 1) % len(STYLES)
+                e.button.label = f"style: {STYLES[self.style_i]}"
+                if self.img:
+                    self.generate()
+            elif bid == "wp-variant":
+                self.action_next_variant()
+            elif bid == "do-apply":
+                self.action_apply_now()
+            elif bid == "do-dry":
+                self.run_apply(dry=True)
+            elif bid == "do-undo":
+                self.action_undo()
+            elif bid == "tog-repo":
+                if not self.repo:
+                    self.status("no dotfiles repo found — start with --repo PATH or set RICE_REPO")
+                    return
+                self.use_repo = not self.use_repo
+                e.button.label = f"repo: {'ON' if self.use_repo else 'off'}"
+            elif bid == "tog-reload":
+                self.do_reload = not self.do_reload
+                e.button.label = f"reload: {'on' if self.do_reload else 'OFF'}"
+
+        # ── actions
+        def action_tab(self, name: str) -> None:
+            self.query_one(TabbedContent).active = name
+            if name == "palette":
+                self.query_one("#roles", RoleTable).focus()
+
+        def nudge(self, ch: str, amt: float) -> None:
+            k = self.cur_key()
+            if not k:
+                return
+            h, s, l = h2hsl(self.get_color(k))
+            if ch == "h":
+                h += amt
+            elif ch == "s":
+                s = max(0.0, min(1.0, s + amt))
+            else:
+                l = max(0.0, min(1.0, l + amt))
+            self.set_color(k, hsl2h(h, s, l))
+            self.refresh_all()
+
+        def reset_role(self) -> None:
+            k = self.cur_key()
+            if not k:
+                return
+            if k.startswith("ansi:"):
+                self.set_color(k, self.applied.ansi[int(k[5:])])
+            else:
+                self.set_color(k, self.applied.roles[k])
+            self.refresh_all()
+            self.status(f"{self.label_for(k)} reset to the last applied value")
+
+        def use_current(self) -> None:
+            img, note = detect_wallpaper()
+            if not img:
+                self.status("couldn't find your wallpaper — type a path below")
+                return
+            self.load_image(img, note)
+            self.generate()
+
+        def load_image(self, p: Path, note: str = "") -> None:
+            if not p.is_file():
+                self.status(f"not a file: {p}")
+                return
+            if p.suffix.lower() in VIDEO_EXT - {".gif"}:
+                fr = video_frame(p)
+                if not fr:
+                    self.status("video wallpaper but ffmpeg couldn't grab a frame")
+                    return
+                note = note or f"frame of {p.name}"
+                p = fr
+            self.img = p
+            self.query_one("#wp-path", Input).value = str(p)
+            self.query_one("#wp-info", Static).update(f"source image: {p}\n{note}")
+
+        def action_generate(self) -> None:
+            self.action_tab("wallpaper")
+            if self.img is None:
+                self.use_current()
+            else:
+                self.generate()
+
+        def action_next_variant(self) -> None:
+            self.variant += 1
+            if self.img:
+                self.generate()
+            else:
+                self.use_current()
+
+        def generate(self) -> None:
+            if self.img is None:
+                return
+            if self.busy:
+                return
+            self.busy = True
+            self.status("reading colors from the image…")
+            self.gen_worker(self.img, STYLES[self.style_i], self.variant)
+
+        @work(thread=True, exclusive=True)
+        def gen_worker(self, img: Path, style: str, variant: int) -> None:
+            try:
+                cl = extract_clusters(img)
+                pal = build_palette(cl, style, variant, name=img.stem)
+                self.call_from_thread(self.gen_done, cl, pal, style, variant)
+            except Exception as exc:  # noqa: BLE001
+                self.call_from_thread(self.gen_fail, str(exc))
+
+        def gen_fail(self, msg: str) -> None:
+            self.busy = False
+            self.status(f"couldn't read image: {msg}")
+
+        def gen_done(self, cl, pal, style, variant) -> None:
+            self.busy = False
+            self.pal = pal
+            t = Text()
+            t.append("dominant colors: ")
+            for c in cl[:12]:
+                t.append("██", style=c.hex)
+            self.query_one("#clusters", Static).update(t)
+            self.refresh_all()
+            self.status(f"palette from {pal.name} · style {style} · variant {variant} — press A to apply, n for another take")
+
+        def selected_targets(self) -> list[str]:
+            return list(self.query_one("#targets", SelectionList).selected)
+
+        def action_apply_now(self) -> None:
+            self.run_apply(dry=False)
+
+        def run_apply(self, dry: bool) -> None:
+            keys = self.selected_targets()
+            if not keys:
+                self.status("no targets selected (tab 3)")
+                return
+            self.action_tab("apply")
+            log = self.query_one("#log", RichLog)
+            log.clear()
+            repo = self.repo if self.use_repo else None
+            hook_msgs: list[str] = []
+            results = apply_palette(self.pal, keys, repo, dry, self.do_reload, hook_msgs.append)
+            for r in results:
+                log.write(f"{r.status:9} {r.target:10} {r.path}  {r.detail}")
+            for m in hook_msgs:
+                log.write(m)
+            ok = sum(1 for r in results if r.status == "ok")
+            if dry:
+                log.write("— dry run, nothing written —")
+            else:
+                self.applied = self.pal.copy()
+                self.refresh_all()
+            self.status(f"{'would change' if dry else 'changed'} {ok} files")
+
+        def action_undo(self) -> None:
+            log = self.query_one("#log", RichLog)
+            msg = restore_last(self.do_reload, lambda m: log.write(m))
+            log.write(msg)
+            st = load_state()
+            self.pal = finalize(Palette.from_dict(st["applied"]) if st.get("applied") else Palette(), rederive=False)
+            self.applied = self.pal.copy()
+            self.refresh_all()
+            self.status(msg)
+
+    RiceColors().run()
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="rice-colors", description="palette editor + wallpaper color generator")
+    ap.add_argument("--wallpaper", action="store_true", help="build a palette from the current wallpaper")
+    ap.add_argument("--image", metavar="FILE", help="build a palette from this image")
+    ap.add_argument("--preset", metavar="NAME", help="use a saved preset (AliceNight = stock)")
+    ap.add_argument("--style", choices=STYLES, default="balanced")
+    ap.add_argument("--variant", type=int, default=0, help="alternate take on the same image (0,1,2…)")
+    ap.add_argument("--apply", action="store_true", help="write the palette into the rice")
+    ap.add_argument("--targets", metavar="a,b,c", help="only these targets (see --list-targets)")
+    ap.add_argument("--repo", metavar="PATH", help="dotfiles repo checkout; also updates it")
+    ap.add_argument("--with-repo", action="store_true", help="also update the auto-detected dotfiles repo")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-reload", action="store_true", help="don't signal running apps to reload")
+    ap.add_argument("--restore", action="store_true", help="undo the last apply")
+    ap.add_argument("--list-targets", action="store_true")
+    args = ap.parse_args()
+    if args.wallpaper or args.image or args.preset or args.restore or args.list_targets:
+        return main_cli(args)
+    return run_tui(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
