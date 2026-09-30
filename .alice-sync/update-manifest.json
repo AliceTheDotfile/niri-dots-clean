@@ -1,7 +1,8 @@
 {
   "version": 1,
   "managed": [
-    "alice-rice/fastfetch.jsonc"
+    "alice-rice/fastfetch.jsonc",
+    "niri/parts/movement.kdl"
   ],
   "deleted": []
 }
