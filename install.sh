@@ -57,17 +57,16 @@ Alice's Niri dotfiles installer :3
 
 Python/stdlib-only installer for Arch Linux.
 
-It can run from:
-  * a local git clone containing install.sh
-  * the single-file install.sh bootstrap
+The repository is a baseline rice. A fresh install copies the complete
+baseline. Existing-system updates are different: they use
+.alice-sync/update-manifest.json to decide exactly which files are allowed to
+change.
 
-When the repository is not present locally, the installer downloads the
-latest main branch archive into a temporary directory and cleans it up when
-finished.
+Fresh install:
+  repository -> complete baseline rice
 
-Managed:
-  Niri, Quickshell, Kate, Wallfliper, themes, local scripts, wallpapers,
-  selected desktop configuration, packages, and fresh-system services.
+Future update:
+  git/archive -> update manifest -> only explicitly shared files
 
 Never managed:
   ~/.config/waybar
@@ -79,6 +78,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
 import shutil
@@ -88,14 +88,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 from pathlib import Path
 from typing import Iterable
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 REPO_URL = "https://github.com/AliceTheDotfile/niri-dots-clean"
 ARCHIVE_URL = (
     "https://codeload.github.com/AliceTheDotfile/"
@@ -113,6 +112,8 @@ TIMESTAMP = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 BACKUP = BACKUP_ROOT / TIMESTAMP
 LOG_FILE = CACHE_ROOT / f"install-{TIMESTAMP}.log"
 
+UPDATE_MANIFEST_REL = ".alice-sync/update-manifest.json"
+
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -127,15 +128,12 @@ GRAY = "\033[90m"
 
 
 CORE_PKGS = [
-    # Niri
     "niri",
     "xwayland-satellite",
-    # Shell / terminal
     "quickshell",
     "kitty",
     "swaync",
     "wofi",
-    # KDE / themes
     "kate",
     "qt6ct",
     "nwg-look",
@@ -143,40 +141,32 @@ CORE_PKGS = [
     "layer-shell-qt",
     "papirus-icon-theme",
     "dconf",
-    # Wallpaper
     "awww",
     "mpv",
     "ffmpeg",
     "pyside6",
-    # Audio
     "pipewire",
     "pipewire-pulse",
     "wireplumber",
     "playerctl",
     "pavucontrol",
-    # Wayland utilities
     "brightnessctl",
     "grim",
     "slurp",
     "wl-clipboard",
-    # Desktop integration
     "xdg-utils",
     "xdg-user-dirs",
     "xdg-desktop-portal",
     "xdg-desktop-portal-gtk",
-    # Networking
     "networkmanager",
     "network-manager-applet",
-    # Bluetooth
     "bluez",
     "bluez-utils",
     "blueman",
-    # General
     "python",
     "jq",
     "rsync",
     "git",
-    # Fonts
     "ttf-hack",
     "noto-fonts",
     "noto-fonts-emoji",
@@ -324,36 +314,24 @@ class Installer:
         return text
 
     def say(self, message: str) -> None:
-        self.logger.write(
-            f"{self.paint(PINK, '::')} {message}"
-        )
+        self.logger.write(f"{self.paint(PINK, '::')} {message}")
 
     def info(self, message: str) -> None:
-        self.logger.write(
-            f"{self.paint(CYAN, '→')} {message}"
-        )
+        self.logger.write(f"{self.paint(CYAN, '→')} {message}")
 
     def success(self, message: str) -> None:
-        self.logger.write(
-            f"{self.paint(GREEN, '✓')} {message}"
-        )
+        self.logger.write(f"{self.paint(GREEN, '✓')} {message}")
 
     def warn(self, message: str) -> None:
-        self.logger.write(
-            f"{self.paint(YELLOW, '!')} {message}"
-        )
+        self.logger.write(f"{self.paint(YELLOW, '!')} {message}")
 
     def fail(self, message: str) -> None:
-        self.logger.write(
-            f"{self.paint(RED, '✗')} {message}"
-        )
+        self.logger.write(f"{self.paint(RED, '✗')} {message}")
 
     def step(self, message: str) -> None:
         self.step_no += 1
         prefix = f"[{self.step_no}/{self.total_steps}]"
-        self.logger.write(
-            f"{self.paint(PURPLE, prefix)} {message}"
-        )
+        self.logger.write(f"{self.paint(PURPLE, prefix)} {message}")
 
     def clear(self) -> None:
         if sys.stdout.isatty():
@@ -366,14 +344,12 @@ class Installer:
     def cleanup(self) -> None:
         if self.bootstrap_dir and self.bootstrap_dir.exists():
             shutil.rmtree(self.bootstrap_dir, ignore_errors=True)
-
         self.logger.close()
 
     def fail_gracefully(self, exc: BaseException) -> int:
         if isinstance(exc, KeyboardInterrupt):
             self.fail("installation cancelled")
             return 130
-
         self.fail(str(exc))
         self.info(f"log saved to {LOG_FILE}")
         if self.backup_created:
@@ -394,17 +370,14 @@ class Installer:
                 "this installer requires Arch Linux or another "
                 "Arch-based system with pacman"
             )
-
         if os.geteuid() == 0:
             raise InstallerError("do not run this installer as root")
-
         if not self.command_exists("sudo"):
             raise InstallerError("sudo is required by this installer")
 
     def ensure_sudo(self) -> None:
         if self.args.dry_run:
             return
-
         self.say("checking sudo access")
         result = subprocess.run(
             ["sudo", "-v"],
@@ -423,13 +396,11 @@ class Installer:
     def repo_complete(self, path: Path | None) -> bool:
         if path is None:
             return False
-
         required = [path / item for item in REQUIRED_REPO_PATHS]
         return all(item.exists() for item in required)
 
     def discover_local_repo(self) -> Path | None:
         candidates: list[Path] = []
-
         cwd = Path.cwd().resolve()
         candidates.append(cwd)
 
@@ -445,15 +416,16 @@ class Installer:
             if candidate in seen:
                 continue
             seen.add(candidate)
-
             if self.repo_complete(candidate):
                 return candidate
-
         return None
 
-    def _safe_extract_tar(self, archive: tarfile.TarFile, destination: Path) -> None:
+    def _safe_extract_tar(
+        self,
+        archive: tarfile.TarFile,
+        destination: Path,
+    ) -> None:
         destination = destination.resolve()
-
         for member in archive.getmembers():
             target = (destination / member.name).resolve()
             try:
@@ -462,17 +434,14 @@ class Installer:
                 raise InstallerError(
                     f"refusing unsafe archive path: {member.name}"
                 )
-
         for member in archive.getmembers():
             archive.extract(member, path=destination)
 
     def download_repo(self) -> Path:
         self.say("downloading latest Alice Niri dots from GitHub")
-
         self.bootstrap_dir = Path(
             tempfile.mkdtemp(prefix="alice-niri-dots-")
         )
-
         archive_path = self.bootstrap_dir / "repo.tar.gz"
 
         request = Request(
@@ -497,7 +466,6 @@ class Installer:
             ) from exc
 
         self.say("extracting repository")
-
         extract_root = self.bootstrap_dir / "extract"
         extract_root.mkdir()
 
@@ -510,10 +478,7 @@ class Installer:
             ) from exc
 
         roots = [p for p in extract_root.iterdir() if p.is_dir()]
-        if len(roots) == 1:
-            repo = roots[0]
-        else:
-            repo = extract_root
+        repo = roots[0] if len(roots) == 1 else extract_root
 
         if not self.repo_complete(repo):
             raise InstallerError(
@@ -526,7 +491,6 @@ class Installer:
 
     def bootstrap_repo(self) -> None:
         local = self.discover_local_repo()
-
         if local is not None:
             self.dotfiles = local
             self.info(f"repository: {local}")
@@ -537,13 +501,11 @@ class Installer:
 
     def validate_repo(self) -> None:
         assert self.dotfiles is not None
-
         self.step("checking repository")
 
         missing = []
         for rel in REQUIRED_REPO_PATHS:
-            path = self.dotfiles / rel
-            if not path.exists():
+            if not (self.dotfiles / rel).exists():
                 missing.append(rel)
 
         for rel in OPTIONAL_REPO_PATHS:
@@ -560,7 +522,6 @@ class Installer:
 
     def update_repo(self) -> None:
         assert self.dotfiles is not None
-
         git_dir = self.dotfiles / ".git"
 
         if not git_dir.is_dir():
@@ -579,7 +540,6 @@ class Installer:
             text=True,
             check=False,
         )
-
         if result.returncode != 0:
             raise InstallerError("could not inspect git repository")
 
@@ -610,7 +570,17 @@ class Installer:
             return
 
         self.say("pulling latest dotfiles")
-        self.run_cmd(["git", "-C", str(self.dotfiles), "-c", "core.hooksPath=/dev/null", "pull", "--ff-only"])
+        self.run_cmd(
+            [
+                "git",
+                "-C",
+                str(self.dotfiles),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "pull",
+                "--ff-only",
+            ]
+        )
         self.success("dotfiles repository updated")
 
     # --------------------------------------------------------
@@ -657,22 +627,17 @@ class Installer:
                 f"command failed ({result.returncode}): "
                 + " ".join(command)
             )
-
         return result
 
     # --------------------------------------------------------
     # Interactive helpers
     # --------------------------------------------------------
 
-    def ask(
-        self,
-        prompt: str,
-        *,
-        default: bool = True,
-    ) -> bool:
+    def ask(self, prompt: str, *, default: bool = True) -> bool:
         if self.args.assume_yes:
             return True
-
+        if self.args.assume_no:
+            return False
         if not sys.stdin.isatty():
             return default
 
@@ -684,136 +649,7 @@ class Installer:
 
         if not answer:
             return default
-
         return answer in {"y", "yes"}
-
-    def pause(self) -> None:
-        if not sys.stdin.isatty():
-            return
-
-        try:
-            input("\npress enter to continue...")
-        except EOFError:
-            pass
-
-    def menu(self) -> int:
-        options = [
-            "full setup       — Niri + rice + Kate + apps + AUR",
-            "update existing  — pull newest repo + update rice",
-            "fresh Arch setup — everything + greetd + tuigreet",
-            "minimal setup    — Niri + rice + Kate + core packages",
-            "configs only     — dotfiles without packages",
-            "packages only    — install dependencies/apps",
-            "exit",
-        ]
-
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            self.info("interactive installer needs a terminal")
-            self.info("use --no-tui for a non-interactive launch")
-            return 6
-
-        try:
-            import termios
-            import tty
-        except ImportError as exc:
-            raise InstallerError("terminal input support is unavailable") from exc
-
-        selected = 0
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-
-        try:
-            tty.setcbreak(fd)
-
-            while True:
-                self.clear()
-                print()
-                print(
-                    " "
-                    + self.paint(PINK, "╭──────────────────────────────────────────────────────╮")
-                )
-                print(
-                    " "
-                    + self.paint(PINK, "│")
-                    + " "
-                    + self.paint(WHITE + BOLD, "alice's niri dots installer")
-                    + " "
-                    + self.paint(DIM, f"v{VERSION} :3")
-                    + "                    "
-                    + self.paint(PINK, "│")
-                )
-                print(
-                    " "
-                    + self.paint(PINK, "│")
-                    + " "
-                    + self.paint(GRAY, "python • safe backups • GitHub bootstrap")
-                    + "          "
-                    + self.paint(PINK, "│")
-                )
-                print(
-                    " "
-                    + self.paint(PINK, "╰──────────────────────────────────────────────────────╯")
-                )
-                print()
-                print(
-                    " "
-                    + self.paint(PURPLE + BOLD, "what would you like to do?")
-                )
-                print()
-
-                for index, option in enumerate(options):
-                    if index == selected:
-                        print(
-                            "   "
-                            + self.paint(PINK, "›")
-                            + " "
-                            + self.paint(WHITE + BOLD, option)
-                        )
-                    else:
-                        print(
-                            "     "
-                            + self.paint(GRAY, option)
-                        )
-
-                print()
-                print(
-                    " "
-                    + self.paint(GRAY, "↑/↓ or j/k")
-                    + "   "
-                    + self.paint(GRAY, "Enter")
-                    + " select   "
-                    + self.paint(GRAY, "q")
-                    + " quit"
-                )
-
-                key = os.read(fd, 1)
-
-                if key in (b"\n", b"\r"):
-                    return selected
-
-                if key in (b"j", b"B"):
-                    selected = (selected + 1) % len(options)
-                    continue
-
-                if key in (b"k", b"A"):
-                    selected = (selected - 1) % len(options)
-                    continue
-
-                if key in (b"q", b"Q"):
-                    return len(options) - 1
-
-                if key == b"\x1b":
-                    second = os.read(fd, 1)
-                    if second == b"[":
-                        third = os.read(fd, 1)
-                        if third == b"A":
-                            selected = (selected - 1) % len(options)
-                        elif third == b"B":
-                            selected = (selected + 1) % len(options)
-
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            print(RESET, end="")
 
     # --------------------------------------------------------
     # Package handling
@@ -846,15 +682,8 @@ class Installer:
             return
 
         self.step(f"installing {len(valid)} official packages")
-
         self.run_cmd(
-            [
-                "pacman",
-                "-Syu",
-                "--needed",
-                "--noconfirm",
-                *valid,
-            ],
+            ["pacman", "-Syu", "--needed", "--noconfirm", *valid],
             sudo=True,
         )
         self.success("official packages installed")
@@ -870,7 +699,6 @@ class Installer:
             return "yay"
 
         self.step("bootstrapping yay")
-
         self.install_official_packages(["base-devel", "git"])
 
         temp = Path(tempfile.mkdtemp(prefix="alice-yay-"))
@@ -883,7 +711,6 @@ class Installer:
                     str(temp / "yay"),
                 ]
             )
-
             self.run_cmd(
                 ["makepkg", "-si", "--noconfirm"],
                 cwd=temp / "yay",
@@ -903,18 +730,14 @@ class Installer:
             return
 
         helper = self.aur_helper()
-
         if helper is None:
             self.warn("no AUR helper found")
-
             if self.args.dry_run:
                 self.info("[dry] would offer to install yay")
                 return
-
             if self.args.assume_no:
                 self.warn("AUR packages skipped")
                 return
-
             if self.ask("install yay automatically?", default=True):
                 helper = self.install_yay()
             else:
@@ -922,27 +745,21 @@ class Installer:
                 return
 
         self.step(f"installing {len(package_list)} AUR packages with {helper}")
-
-        self.run_cmd(
-            [
-                helper,
-                "-S",
-                "--needed",
-                "--noconfirm",
-                *package_list,
-            ]
-        )
+        self.run_cmd([
+            helper,
+            "-S",
+            "--needed",
+            "--noconfirm",
+            *package_list,
+        ])
         self.success("AUR packages installed")
 
     def build_package_list(self) -> list[str]:
         packages = list(CORE_PKGS)
-
         if not self.args.minimal:
             packages.extend(NICE_PKGS)
-
         if self.args.fresh:
             packages.extend(FRESH_PKGS)
-
         return list(dict.fromkeys(packages))
 
     def install_deps(self) -> None:
@@ -978,7 +795,6 @@ class Installer:
             relative = Path("outside-home") / destination.as_posix().lstrip("/")
 
         target = BACKUP / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
 
         if self.args.dry_run:
             self.info(f"[dry] would move {destination} -> {target}")
@@ -993,7 +809,6 @@ class Installer:
             return
 
         files: list[Path] = []
-
         if path.is_file():
             files = [path]
         elif path.is_dir():
@@ -1021,7 +836,11 @@ class Installer:
 
     def place(self, source: Path, destination: Path) -> None:
         if not self.lexists(source):
-            self.warn(f"missing in repo: {source.relative_to(self.dotfiles)}")
+            try:
+                relative = source.relative_to(self.dotfiles) if self.dotfiles else source
+            except ValueError:
+                relative = source
+            self.warn(f"missing in repo: {relative}")
             return
 
         if self.lexists(destination):
@@ -1029,7 +848,7 @@ class Installer:
             self.backup_destination(destination)
 
         if self.args.dry_run:
-            if source.is_dir():
+            if source.is_dir() and not source.is_symlink():
                 self.info(f"[dry] would copy directory {source} -> {destination}")
             else:
                 self.info(f"[dry] would copy {source} -> {destination}")
@@ -1052,6 +871,227 @@ class Installer:
 
         self.replace_home_token(destination)
         self.changed = True
+
+    # --------------------------------------------------------
+    # Manifest-based updates
+    # --------------------------------------------------------
+
+    def load_update_manifest(self) -> tuple[set[str], set[str]]:
+        assert self.dotfiles is not None
+
+        path = self.dotfiles / UPDATE_MANIFEST_REL
+        if not path.is_file():
+            self.warn(
+                "no update manifest exists yet; no shared-rice files will "
+                "be changed by this update"
+            )
+            return set(), set()
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise InstallerError(
+                f"could not read {UPDATE_MANIFEST_REL}: {exc}"
+            ) from exc
+
+        if not isinstance(data, dict) or data.get("version") != 1:
+            raise InstallerError(
+                f"unsupported or invalid {UPDATE_MANIFEST_REL}"
+            )
+
+        managed = data.get("managed", [])
+        deleted = data.get("deleted", [])
+
+        if not isinstance(managed, list) or not isinstance(deleted, list):
+            raise InstallerError(
+                f"invalid managed/deleted lists in {UPDATE_MANIFEST_REL}"
+            )
+
+        def clean(values: list[object]) -> set[str]:
+            result: set[str] = set()
+            for value in values:
+                if not isinstance(value, str) or not value:
+                    raise InstallerError(
+                        f"invalid path in {UPDATE_MANIFEST_REL}"
+                    )
+                rel = Path(value)
+                if rel.is_absolute() or ".." in rel.parts:
+                    raise InstallerError(
+                        f"unsafe path in {UPDATE_MANIFEST_REL}: {value}"
+                    )
+                if "\\" in value:
+                    raise InstallerError(
+                        f"invalid path separator in {UPDATE_MANIFEST_REL}: {value}"
+                    )
+                result.add(rel.as_posix())
+            return result
+
+        managed_set = clean(managed)
+        deleted_set = clean(deleted)
+
+        # A deleted path should still be represented in managed so future
+        # updates know that the file is intentionally absent from the live
+        # baseline. Accept old manifests that forgot this and normalize them.
+        managed_set |= deleted_set
+
+        return managed_set, deleted_set
+
+    def update_destination(self, relative: str) -> Path | None:
+        """Map a repository-relative manifest path to its live-system target."""
+        rel = Path(relative)
+
+        if relative == "dconf/interface.ini":
+            return None
+
+        if relative == "wallfliper/config.json":
+            return CONFIG / "wallfliper/config.json"
+
+        if relative.startswith("wallfliper/"):
+            return SHARE / rel
+
+        if relative.startswith("local/bin/"):
+            return BIN / Path(relative[len("local/bin/"):])
+
+        if relative.startswith("Wallpapers/"):
+            return HOME / Path(relative)
+
+        if relative.startswith("home/"):
+            return HOME / Path(relative[len("home/"):])
+
+        if relative.startswith("quickshell/my-shell/"):
+            return CONFIG / Path(relative)
+
+        for name in CONFIG_DIRS:
+            if relative == name or relative.startswith(name + "/"):
+                return CONFIG / rel
+
+        return None
+
+    def manifest_file_matches_live(self, source: Path, destination: Path) -> bool:
+        if not self.lexists(source) or not self.lexists(destination):
+            return False
+
+        if source.is_symlink() or destination.is_symlink():
+            if not source.is_symlink() or not destination.is_symlink():
+                return False
+            try:
+                source_target = source.readlink()
+                destination_target = destination.readlink()
+                return source_target == destination_target
+            except OSError:
+                return False
+
+        try:
+            source_data = source.read_bytes().replace(
+                b"@HOME@",
+                str(HOME).encode(),
+            )
+            dest_data = destination.read_bytes()
+        except OSError:
+            return False
+
+        return source_data == dest_data
+
+    def remove_manifest_destination(self, destination: Path) -> None:
+        if not self.lexists(destination):
+            return
+
+        self.say(f"removing {destination}")
+        self.backup_destination(destination)
+
+        if self.args.dry_run:
+            return
+
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+        self.changed = True
+
+    def install_manifest_updates(self) -> None:
+        assert self.dotfiles is not None
+
+        managed, deleted = self.load_update_manifest()
+
+        if not managed:
+            self.step("checking manifest-selected rice files")
+            self.warn(
+                "update manifest is empty; no shared-rice files will be changed"
+            )
+            return
+
+        self.step(f"applying {len(managed)} manifest-managed file(s)")
+
+        dconf_needed = False
+        updated = 0
+        unchanged = 0
+        missing = 0
+
+        for relative in sorted(managed):
+            destination = self.update_destination(relative)
+
+            if relative in deleted:
+                if destination is not None:
+                    if self.lexists(destination):
+                        self.remove_manifest_destination(destination)
+                        updated += 1
+                    else:
+                        unchanged += 1
+                elif relative == "dconf/interface.ini":
+                    self.info(
+                        "dconf file is marked deleted; no live dconf action is needed"
+                    )
+                    unchanged += 1
+                else:
+                    self.warn(
+                        f"no live destination is known for deleted path: {relative}"
+                    )
+                continue
+
+            if relative == "dconf/interface.ini":
+                source = self.dotfiles / relative
+                if source.is_file():
+                    dconf_needed = True
+                else:
+                    self.warn(
+                        f"manifest lists {relative}, but it is missing from the repo"
+                    )
+                    missing += 1
+                continue
+
+            if destination is None:
+                self.warn(
+                    f"no live destination is known for {relative}; skipping"
+                )
+                missing += 1
+                continue
+
+            source = self.dotfiles / relative
+
+            if not self.lexists(source):
+                self.warn(
+                    f"manifest lists {relative}, but it is missing from the repo"
+                )
+                missing += 1
+                continue
+
+            if self.manifest_file_matches_live(source, destination):
+                self.info(f"unchanged: {relative}")
+                unchanged += 1
+                continue
+
+            self.place(source, destination)
+            self.info(f"updated: {relative}")
+            updated += 1
+
+        if dconf_needed:
+            self.apply_dconf()
+            updated += 1
+
+        self.success(
+            f"manifest update complete: {updated} changed, "
+            f"{unchanged} unchanged, {missing} missing"
+        )
 
     # --------------------------------------------------------
     # Config installation
@@ -1124,7 +1164,9 @@ class Installer:
                     f'exec python "{SHARE / "wallfliper/main.py"}" "$@"\n',
                     encoding="utf-8",
                 )
-                launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+                launcher.chmod(
+                    launcher.stat().st_mode | stat.S_IXUSR
+                )
                 self.changed = True
 
         self.success("Wallfliper installed")
@@ -1138,7 +1180,8 @@ class Installer:
         self.step("installing scripts to ~/.local/bin")
 
         source_dir = self.dotfiles / "local/bin"
-        BIN.mkdir(parents=True, exist_ok=True) if not self.args.dry_run else None
+        if not self.args.dry_run:
+            BIN.mkdir(parents=True, exist_ok=True)
 
         if source_dir.is_dir():
             for source in sorted(source_dir.iterdir()):
@@ -1213,7 +1256,10 @@ class Installer:
             return False
 
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            text = path.read_text(
+                encoding="utf-8",
+                errors="ignore",
+            )
         except OSError:
             return False
 
@@ -1223,7 +1269,10 @@ class Installer:
             r"PATH=.*\.local/bin",
         )
 
-        return any(re.search(pattern, text) for pattern in patterns)
+        return any(
+            re.search(pattern, text)
+            for pattern in patterns
+        )
 
     def add_path_to_file(self, path: Path) -> None:
         if self.file_mentions_bin(path):
@@ -1252,8 +1301,9 @@ class Installer:
             return
 
         if not self.args.dry_run:
-            os.environ["PATH"] = f"{BIN}{os.pathsep}" + os.environ.get(
-                "PATH", ""
+            os.environ["PATH"] = (
+                f"{BIN}{os.pathsep}"
+                + os.environ.get("PATH", "")
             )
 
         for path in (
@@ -1291,7 +1341,7 @@ class Installer:
             self.info("[dry] would load dconf settings")
             return
 
-        BACKUP.mkdir(parents=True, exist_ok=True)
+        self.ensure_backup_root()
 
         dump = subprocess.run(
             ["dconf", "dump", "/org/gnome/desktop/interface/"],
@@ -1364,7 +1414,13 @@ user = "greeter"
             self.info("[dry] would enable greetd.service")
             return
 
-        temp = Path(tempfile.mkstemp(prefix="greetd-", suffix=".toml")[1])
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix="greetd-",
+            suffix=".toml",
+        )
+        os.close(temp_fd)
+        temp = Path(temp_name)
+
         try:
             temp.write_text(config, encoding="utf-8")
             self.run_cmd(
@@ -1403,7 +1459,6 @@ user = "greeter"
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
-
             if result.returncode != 0:
                 continue
 
@@ -1483,13 +1538,10 @@ user = "greeter"
                     text=True,
                     check=False,
                 )
-
                 if result.returncode == 0:
                     self.success("Wallfliper dependency check passed")
                 else:
-                    self.warn(
-                        "Wallfliper reported missing dependencies"
-                    )
+                    self.warn("Wallfliper reported missing dependencies")
 
     # --------------------------------------------------------
     # Install flows
@@ -1507,7 +1559,6 @@ user = "greeter"
     def do_full_install(self) -> None:
         self.args.fresh = False
         self.args.minimal = False
-
         self.validate_repo()
 
         if self.args.no_deps:
@@ -1518,18 +1569,15 @@ user = "greeter"
         self.apply_rice()
         self.verify()
 
-        self.summary.extend(
-            [
-                "Niri desktop installed",
-                "Kate installed and configured",
-                "Wallfliper installed",
-            ]
-        )
+        self.summary.extend([
+            "Niri desktop installed",
+            "Kate installed and configured",
+            "Wallfliper installed",
+        ])
 
     def do_minimal_install(self) -> None:
         self.args.fresh = False
         self.args.minimal = True
-
         self.validate_repo()
 
         if self.args.no_deps:
@@ -1539,7 +1587,6 @@ user = "greeter"
 
         self.apply_rice()
         self.verify()
-
         self.summary.append("minimal Niri setup installed")
 
     def do_update(self) -> None:
@@ -1551,36 +1598,47 @@ user = "greeter"
         self.update_repo()
         self.validate_repo()
 
-        if not self.args.dry_run:
-            self.logger.write()
-            self.logger.write(
-                self.paint(
-                    YELLOW + BOLD,
-                    "the current repo will be installed over your existing rice.",
-                )
-            )
-            self.info("existing managed files are backed up first.")
-            self.info("Waybar and Fastfetch remain untouched.")
-            self.logger.write()
+        managed, deleted = self.load_update_manifest()
 
-            if not self.ask("apply the updated rice?", default=True):
-                self.info("update cancelled before applying configs")
+        self.logger.write()
+        self.logger.write(
+            self.paint(
+                YELLOW + BOLD,
+                "this update only changes files recorded by sync.py.",
+            )
+        )
+        self.info(
+            f"{len(managed)} file(s) are marked as shared/update-managed"
+        )
+        if deleted:
+            self.info(
+                f"{len(deleted)} file(s) are intentionally marked deleted"
+            )
+        self.info(
+            "machine-specific files omitted from sync.py stay untouched"
+        )
+        self.info("Waybar and Fastfetch remain untouched")
+        self.logger.write()
+
+        if not self.args.dry_run:
+            if not self.ask(
+                "apply the manifest-selected update?",
+                default=True,
+            ):
+                self.info("update cancelled before applying files")
                 return
 
-        self.apply_rice()
+        self.install_manifest_updates()
         self.verify()
 
-        self.summary.extend(
-            [
-                "existing rice updated from the latest repo",
-                "latest repo configuration applied",
-            ]
-        )
+        self.summary.extend([
+            "existing rice updated from sync.py's update manifest",
+            "machine-specific omitted files were preserved",
+        ])
 
     def do_fresh_install(self) -> None:
         self.args.fresh = True
         self.args.minimal = False
-
         self.validate_repo()
 
         self.logger.write()
@@ -1596,7 +1654,10 @@ user = "greeter"
         self.logger.write()
 
         if not self.args.dry_run:
-            if not self.ask("continue with fresh-system setup?", default=True):
+            if not self.ask(
+                "continue with fresh-system setup?",
+                default=True,
+            ):
                 self.info("fresh setup cancelled")
                 return
 
@@ -1619,16 +1680,14 @@ user = "greeter"
 
         self.verify()
 
-        self.summary.extend(
-            [
-                "fresh Arch desktop installed",
-                "Niri installed",
-                "Kate installed and configured",
-                "Wallfliper installed",
-                "greetd + tuigreet configured",
-                "NetworkManager + Bluetooth configured",
-            ]
-        )
+        self.summary.extend([
+            "fresh Arch desktop installed",
+            "Niri installed",
+            "Kate installed and configured",
+            "Wallfliper installed",
+            "greetd + tuigreet configured",
+            "NetworkManager + Bluetooth configured",
+        ])
 
         if not self.args.dry_run and not self.args.skip_reboot:
             self.logger.write()
@@ -1638,18 +1697,14 @@ user = "greeter"
 
     def do_configs_only(self) -> None:
         self.args.fresh = False
-
         self.validate_repo()
         self.apply_rice()
         self.verify()
-
-        self.summary.extend(
-            [
-                "desktop configs installed",
-                "shell / Kate / theme files installed",
-                "Wallfliper installed",
-            ]
-        )
+        self.summary.extend([
+            "desktop configs installed",
+            "shell / Kate / theme files installed",
+            "Wallfliper installed",
+        ])
 
     def do_packages_only(self) -> None:
         if self.args.no_deps:
@@ -1657,7 +1712,6 @@ user = "greeter"
             return
 
         self.install_deps()
-
         if self.args.minimal:
             self.summary.append("core packages installed")
         else:
@@ -1697,23 +1751,17 @@ user = "greeter"
         self.success("~/.local/bin handled")
 
         print()
-        self.logger.write(
-            self.paint(CYAN, "intentionally untouched:")
-        )
+        self.logger.write(self.paint(CYAN, "intentionally untouched:"))
         self.logger.write("  • ~/.config/waybar")
         self.logger.write("  • ~/.config/fastfetch")
         self.logger.write("  • Kate session files")
 
         if self.backup_created:
             print()
-            self.logger.write(
-                self.paint(CYAN, f"backup: {BACKUP}")
-            )
+            self.logger.write(self.paint(CYAN, f"backup: {BACKUP}"))
 
         print()
-        self.logger.write(
-            self.paint(CYAN, f"log: {LOG_FILE}")
-        )
+        self.logger.write(self.paint(CYAN, f"log: {LOG_FILE}"))
 
         if self.args.fresh:
             print()
@@ -1728,8 +1776,9 @@ user = "greeter"
             self.logger.write(
                 self.paint(WHITE + BOLD, "update next step:")
             )
+            self.logger.write("  • only sync.py-selected files were updated")
             self.logger.write("  • restart Niri / Quickshell if needed")
-            self.logger.write("  • open a new shell if PATH changed")
+            self.logger.write("  • machine-specific omitted files were left alone")
         elif self.args.mode == "packages":
             print()
             self.logger.write(
@@ -1747,6 +1796,126 @@ user = "greeter"
         print()
         self.logger.write(self.paint(DIM, "have fun rice-ing :3"))
 
+    def menu(self) -> int:
+        options = [
+            "full setup       — Niri + rice + Kate + apps + AUR",
+            "update existing  — pull newest repo + manifest-selected files",
+            "fresh Arch setup — everything + greetd + tuigreet",
+            "minimal setup    — Niri + rice + Kate + core packages",
+            "configs only     — complete baseline configs without packages",
+            "packages only    — install dependencies/apps",
+            "exit",
+        ]
+
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            self.info("interactive installer needs a terminal")
+            self.info("use --no-tui for a non-interactive launch")
+            return 6
+
+        try:
+            import termios
+            import tty
+        except ImportError as exc:
+            raise InstallerError(
+                "terminal input support is unavailable"
+            ) from exc
+
+        selected = 0
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+
+        try:
+            tty.setcbreak(fd)
+
+            while True:
+                self.clear()
+                print()
+                print(
+                    " "
+                    + self.paint(PINK, "╭──────────────────────────────────────────────────────╮")
+                )
+                print(
+                    " "
+                    + self.paint(PINK, "│")
+                    + " "
+                    + self.paint(WHITE + BOLD, "alice's niri dots installer")
+                    + " "
+                    + self.paint(DIM, f"v{VERSION} :3")
+                    + "                    "
+                    + self.paint(PINK, "│")
+                )
+                print(
+                    " "
+                    + self.paint(PINK, "│")
+                    + " "
+                    + self.paint(GRAY, "baseline rice • manifest-aware updates")
+                    + "        "
+                    + self.paint(PINK, "│")
+                )
+                print(
+                    " "
+                    + self.paint(PINK, "╰──────────────────────────────────────────────────────╯")
+                )
+                print()
+                print(
+                    " "
+                    + self.paint(PURPLE + BOLD, "what would you like to do?")
+                )
+                print()
+
+                for index, option in enumerate(options):
+                    if index == selected:
+                        print(
+                            "   "
+                            + self.paint(PINK, "›")
+                            + " "
+                            + self.paint(WHITE + BOLD, option)
+                        )
+                    else:
+                        print(
+                            "     "
+                            + self.paint(GRAY, option)
+                        )
+
+                print()
+                print(
+                    " "
+                    + self.paint(GRAY, "↑/↓ or j/k")
+                    + "   "
+                    + self.paint(GRAY, "Enter")
+                    + " select   "
+                    + self.paint(GRAY, "q")
+                    + " quit"
+                )
+
+                key = os.read(fd, 1)
+
+                if key in (b"\n", b"\r"):
+                    return selected
+
+                if key in (b"j", b"B"):
+                    selected = (selected + 1) % len(options)
+                    continue
+
+                if key in (b"k", b"A"):
+                    selected = (selected - 1) % len(options)
+                    continue
+
+                if key in (b"q", b"Q"):
+                    return len(options) - 1
+
+                if key == b"\x1b":
+                    second = os.read(fd, 1)
+                    if second == b"[":
+                        third = os.read(fd, 1)
+                        if third == b"A":
+                            selected = (selected - 1) % len(options)
+                        elif third == b"B":
+                            selected = (selected + 1) % len(options)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            print(RESET, end="")
+
     def execute(self) -> int:
         try:
             self.require_arch()
@@ -1754,11 +1923,10 @@ user = "greeter"
             if self.args.mode != "packages":
                 self.bootstrap_repo()
 
-            # Set a useful step count after selecting the actual action.
             if self.args.mode == "fresh":
                 self.total_steps = 12
             elif self.args.mode == "update":
-                self.total_steps = 10
+                self.total_steps = 8
             elif self.args.mode == "minimal":
                 self.total_steps = 9
             elif self.args.mode == "configs":
@@ -1783,7 +1951,6 @@ user = "greeter"
                     self.do_full_install()
                 else:
                     choice = self.menu()
-
                     if choice == 0:
                         self.do_full_install()
                     elif choice == 1:
@@ -1810,8 +1977,7 @@ user = "greeter"
             return 0
 
         except BaseException as exc:
-            self.fail_gracefully(exc)
-            return 130 if isinstance(exc, KeyboardInterrupt) else 1
+            return self.fail_gracefully(exc)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1841,7 +2007,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="mode",
         action="store_const",
         const="configs",
-        help="install configs without packages",
+        help="install the complete baseline configs without packages",
     )
     parser.add_argument(
         "--packages-only",
@@ -1895,8 +2061,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     args = parser.parse_args()
 
-    # The parser intentionally stores the chosen mode separately so the
-    # TUI can still set it later.
     if not hasattr(args, "mode") or args.mode is None:
         args.mode = "menu"
 
@@ -1916,7 +2080,6 @@ def main() -> int:
     args = build_parser()
     installer = Installer(args)
 
-    # Make SIGTERM/SIGINT end in a controlled cleanup path.
     def handle_signal(signum: int, _frame: object) -> None:
         raise KeyboardInterrupt
 
