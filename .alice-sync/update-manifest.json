@@ -2,7 +2,8 @@
   "version": 1,
   "managed": [
     "alice-rice/fastfetch.jsonc",
-    "niri/parts/movement.kdl"
+    "niri/parts/movement.kdl",
+    "quickshell/my-shell/TimeWidget.qml"
   ],
   "deleted": []
 }
