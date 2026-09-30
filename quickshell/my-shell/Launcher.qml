@@ -25,7 +25,7 @@ Item {
 
     // Animation speeds (in ms)
     readonly property int panelAnimationDuration: 250
-    readonly property int triggerAnimationDuration: 500// Independent speed for bar expansion
+    readonly property int triggerAnimationDuration: 500 // Independent speed for bar expansion
 
     // Higher = trigger expands more slowly across its own timeline.
     // 1.0 = linear
@@ -68,6 +68,9 @@ Item {
     property real volumeLevel: 0.70
     property bool isMuted: false
 
+    // ---- search query state ----
+    property string searchQuery: ""
+
     // ---- unified border color ----
     readonly property color currentBorderColor:
     root.insideLauncher
@@ -75,7 +78,7 @@ Item {
     : root.colViolet
 
     // ============================================================
-    // SORTING
+    // SORTING & FILTERING
     // ============================================================
 
     property string sortMode: "A-Z"
@@ -191,6 +194,28 @@ Item {
         return list
     }
 
+    readonly property var filteredAppEntries: {
+        let list = root.allAppEntries
+        let q = root.searchQuery.trim().toLowerCase()
+
+        if (q.length === 0)
+            return list
+
+            return list.filter(e => {
+                const name = (e.name || "").toLowerCase()
+                const genName = (e.genericName || "").toLowerCase()
+                const comment = (e.comment || "").toLowerCase()
+                const cats = (e.categories || []).join(" ").toLowerCase()
+                const exec = (e.exec || "").toLowerCase()
+
+                return name.includes(q) ||
+                genName.includes(q) ||
+                comment.includes(q) ||
+                cats.includes(q) ||
+                exec.includes(q)
+            })
+    }
+
     function cycleSort(reverse) {
         let index = root.sortModes.indexOf(root.sortMode)
 
@@ -241,6 +266,9 @@ Item {
         triggerAnimation.from = root.triggerProgress
         triggerAnimation.to = 0.0
         triggerAnimation.restart()
+
+        root.searchQuery = ""
+        searchInput.text = ""
     }
 
     function scheduleHide() {
@@ -281,7 +309,8 @@ Item {
         interval: 10
 
         onTriggered: {
-            appGrid.forceActiveFocus()
+            searchInput.forceActiveFocus()
+            searchInput.selectAll()
         }
     }
 
@@ -327,6 +356,8 @@ Item {
         color: "transparent"
 
         Rectangle {
+            id: triggerBar
+
             anchors {
                 horizontalCenter: parent.horizontalCenter
                 bottom: parent.bottom
@@ -345,7 +376,12 @@ Item {
         }
 
         MouseArea {
-            anchors.fill: parent
+            anchors {
+                horizontalCenter: triggerBar.horizontalCenter
+                bottom: parent.bottom
+            }
+            width: triggerBar.width
+            height: parent.height
 
             hoverEnabled: true
 
@@ -597,6 +633,128 @@ Item {
                 }
 
                 // ====================================================
+                // SEARCH BAR
+                // ====================================================
+
+                Rectangle {
+                    id: searchBarContainer
+
+                    anchors {
+                        top: header.bottom
+                        left: parent.left
+                        right: parent.right
+                        topMargin: 4
+                        leftMargin: 12
+                        rightMargin: 12
+                    }
+
+                    height: 26
+                    color: root.colNavy
+                    radius: 0
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "transparent"
+                        border.width: searchInput.activeFocus ? 1 : 0
+                        border.color: root.colAccent
+                    }
+
+                    Row {
+                        anchors.fill: parent
+                        anchors.leftMargin: 8
+                        anchors.rightMargin: 8
+                        spacing: 8
+
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: ""
+                            color: searchInput.activeFocus ? root.colAccent : root.colViolet
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: 10
+
+                            Behavior on color {
+                                ColorAnimation { duration: 100 }
+                            }
+                        }
+
+                        Item {
+                            width: parent.width - 24
+                            height: parent.height
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                text: "Search applications..."
+                                color: Qt.rgba(root.colFg.r, root.colFg.g, root.colFg.b, 0.4)
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: 9
+                                visible: searchInput.text.length === 0
+                            }
+
+                            TextInput {
+                                id: searchInput
+
+                                anchors.fill: parent
+                                verticalAlignment: Text.AlignVCenter
+
+                                color: root.colFgBright
+                                selectionColor: root.colSelBg
+                                selectedTextColor: root.colFgBright
+
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: 9
+
+                                focus: true
+
+                                onTextChanged: {
+                                    root.searchQuery = text
+                                    appGrid.currentIndex = 0
+                                    appGrid.positionViewAtBeginning()
+                                }
+
+                                Keys.onDownPressed: {
+                                    appGrid.forceActiveFocus()
+                                }
+
+                                Keys.onReturnPressed: launchCurrent()
+                                Keys.onEnterPressed: launchCurrent()
+
+                                function launchCurrent() {
+                                    if (root.filteredAppEntries.length > 0) {
+                                        let idx = Math.max(0, Math.min(appGrid.currentIndex, root.filteredAppEntries.length - 1))
+                                        root.launch(root.filteredAppEntries[idx])
+                                    }
+                                }
+
+                                Keys.onEscapePressed: {
+                                    if (text.length > 0) {
+                                        text = ""
+                                    } else {
+                                        root.close()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ====================================================
+                // EMPTY SEARCH STATE
+                // ====================================================
+
+                Text {
+                    anchors.centerIn: appGrid
+                    visible: root.filteredAppEntries.length === 0
+
+                    text: "No applications found"
+                    color: Qt.rgba(root.colFg.r, root.colFg.g, root.colFg.b, 0.5)
+
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: 10
+                }
+
+                // ====================================================
                 // APP GRID
                 // ====================================================
 
@@ -604,7 +762,7 @@ Item {
                     id: appGrid
 
                     anchors {
-                        top: header.bottom
+                        top: searchBarContainer.bottom
                         left: parent.left
                         right: parent.right
                         bottom: parent.bottom
@@ -621,7 +779,7 @@ Item {
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
 
-                    model: root.allAppEntries
+                    model: root.filteredAppEntries
                     focus: root.open
 
                     keyNavigationEnabled: true
@@ -635,16 +793,29 @@ Item {
                         radius: 0
                     }
 
+                    Keys.onUpPressed: function(event) {
+                        if (appGrid.currentIndex < 6) {
+                            searchInput.forceActiveFocus()
+                            event.accepted = true
+                        } else {
+                            event.accepted = false
+                        }
+                    }
+
                     Keys.onReturnPressed: {
-                        root.launch(
-                            root.allAppEntries[appGrid.currentIndex]
-                        )
+                        if (root.filteredAppEntries.length > 0) {
+                            root.launch(
+                                root.filteredAppEntries[appGrid.currentIndex]
+                            )
+                        }
                     }
 
                     Keys.onEnterPressed: {
-                        root.launch(
-                            root.allAppEntries[appGrid.currentIndex]
-                        )
+                        if (root.filteredAppEntries.length > 0) {
+                            root.launch(
+                                root.filteredAppEntries[appGrid.currentIndex]
+                            )
+                        }
                     }
 
                     Keys.onEscapePressed: {
