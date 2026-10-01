@@ -1,6 +1,14 @@
 {
   "version": 1,
   "managed": [
+    "Wallpapers/1168050.png",
+    "Wallpapers/1172158.png",
+    "Wallpapers/958190.png",
+    "Wallpapers/thumb-1920-941959.png",
+    "Wallpapers/wallpaper.png",
+    "Wallpapers/wallpaper1.png",
+    "Wallpapers/wallpaper2.png",
+    "Wallpapers/wallpaperglitch.png",
     "alice-rice/fastfetch.jsonc",
     "environment.d/90-java-awt.conf",
     "local/bin/rice-colors",
