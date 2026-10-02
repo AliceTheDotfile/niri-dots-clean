@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "paths": [
+    {
+      "live": "~/.local/share/applications/rice-colors.desktop",
+      "repo": "home/.local/share/applications/rice-colors.desktop"
+    }
+  ]
+}
