@@ -17,6 +17,7 @@
     "local/bin/rice-colors",
     "local/bin/rice-colors-launch",
     "local/bin/theme-settings",
+    "niri/parts/apps.kdl",
     "niri/parts/movement.kdl",
     "quickshell/my-shell/99a596372fcc8b84cc32d688d9d8b6e1.png",
     "quickshell/my-shell/TimeWidget.qml"

@@ -9,4 +9,6 @@ binds {
     // Steam: Super+C was already taken by Kitty.
     Super+Shift+C { spawn "steam"; }
     Super+S { screenshot; }
+
+    Ctrl+L { spawn "hyprlock"; }
 }
