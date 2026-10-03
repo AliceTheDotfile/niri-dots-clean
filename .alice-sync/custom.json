@@ -12,6 +12,10 @@
     {
       "live": "~/.local/share/icons/icon.png",
       "repo": "home/.local/share/icons/icon.png"
+    },
+    {
+      "live": "~/.local/share/icons/iconcolor.png",
+      "repo": "home/.local/share/icons/iconcolor.png"
     }
   ]
 }
