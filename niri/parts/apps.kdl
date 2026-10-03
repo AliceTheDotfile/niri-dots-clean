@@ -10,5 +10,5 @@ binds {
     Super+Shift+C { spawn "steam"; }
     Super+S { screenshot; }
 
-    Ctrl+L { spawn "hyprlock"; }
+    Super+L { spawn "hyprlock"; }
 }
