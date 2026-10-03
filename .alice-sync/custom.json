@@ -4,6 +4,14 @@
     {
       "live": "~/.local/share/applications/rice-colors.desktop",
       "repo": "home/.local/share/applications/rice-colors.desktop"
+    },
+    {
+      "live": "~/Projects/niri-dots-clean/home/.local/share/icons/icon.png",
+      "repo": "home/Projects/niri-dots-clean/home/.local/share/icons/icon.png"
+    },
+    {
+      "live": "~/.local/share/icons/icon.png",
+      "repo": "home/.local/share/icons/icon.png"
     }
   ]
 }
