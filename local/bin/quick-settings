@@ -1,0 +1,2031 @@
+#!/usr/bin/env python3
+"""
+quick-settings — keyboard-first settings TUI for Alice's Niri rice :3
+
+READS THE LIVE THEME FROM:
+    ~/.config/niri/parts/colors.kdl
+
+WRITES ONLY THESE LIVE NIRI FILES:
+    ~/.config/niri/parts/input.kdl
+    ~/.config/niri/parts/apps.kdl
+    ~/.config/niri/parts/layout.kdl
+    ~/.config/niri/parts/overview.kdl
+
+It never writes to the dotfiles git repository and never copies anything back to it.
+apps.kdl is only modified for spawn/spawn-sh application bindings plus the optional
+hyprlock lid-close event. Other bindings are preserved.
+
+Persistent UI config:
+    ~/.config/quick-settings/ui.json
+
+Needs:
+    python-textual
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+try:
+    from typing import Any
+except ImportError:  # pragma: no cover
+    Any = object  # type: ignore[misc,assignment]
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
+STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "quick-settings"
+BACKUPS = STATE / "backups"
+
+LIVE = {
+    "input": CONFIG / "niri/parts/input.kdl",
+    "apps": CONFIG / "niri/parts/apps.kdl",
+    "layout": CONFIG / "niri/parts/layout.kdl",
+    "overview": CONFIG / "niri/parts/overview.kdl",
+    "colors": CONFIG / "niri/parts/colors.kdl",  # read-only palette source
+}
+
+WRITABLE_LIVE = {
+    LIVE["input"],
+    LIVE["apps"],
+    LIVE["layout"],
+    LIVE["overview"],
+}
+
+STOCK_ROLES = {
+    "bg": "#09152F",
+    "navy": "#0F183D",
+    "selection": "#2C1F4E",
+    "fg": "#D9CFE0",
+    "fg_bright": "#F3EAF2",
+    "accent": "#EF6261",
+    "pink": "#B63A6C",
+    "rose": "#9B346B",
+    "violet": "#5F295D",
+    "purple": "#67315F",
+    "success": "#7FA68A",
+    "warning": "#D8B45F",
+    "bg_deep": "#0D1730",
+    "surface": "#2F2940",
+    "border_soft": "#2C3454",
+    "fg_dim": "#C8C0CC",
+}
+
+
+# =============================================================================
+# QUICK-SETTINGS UI EDITING AREA
+# =============================================================================
+
+UI_TEXT = {
+    "title": "Quick Settings",
+    "header": {
+        "title": "Quick Settings",
+        "source": "live: ~/.config/niri/parts",
+        "colors": "colors",
+        "quit": "quit",
+    },
+    "sections": {
+        "pointer": "Mouse Settings",
+        "apps": "App Keybinds",
+        "niri": "Quick Niri Toggles",
+        "lock": "Lock Screen",
+        "log": "Apply Log",
+    },
+    "pointer": {
+        "mouse_speed": "mouse accel-speed",
+        "touchpad_speed": "touchpad accel-speed",
+        "mouse_natural": "mouse natural-scroll",
+        "touchpad_natural": "touchpad natural-scroll",
+        "touchpad_tap": "touchpad tap",
+        "focus_mouse": "focus follows mouse",
+    },
+    "actions": {
+        "add_app": "add app",
+        "edit_app": "edit app",
+        "delete_app": "delete app",
+    },
+    "apps": {
+        "key_placeholder": "",
+        "command_placeholder": "",
+        "save": "save",
+        "cancel": "cancel",
+        "help": "a add · e edit · d delete",
+        "key_column": "key",
+        "command_column": "command",
+    },
+    "niri": {
+        "gaps": "column gaps",
+        "zoom": "overview zoom",
+    },
+    "lock": {
+        "lid": "lock when laptop lid closes",
+        "description": "",
+    },
+    "bottom": {
+        "apply": "apply",
+        "undo": "undo",
+    },
+    "footer": {
+        "apply": "apply",
+        "undo": "undo",
+        "app_binds": "app binds",
+        "sections": "sections",
+        "tab": "move",
+        "quit": "quit",
+    },
+    "status": {
+        "ready": "ready · edits are staged until apply",
+        "unsaved": "● unsaved",
+        "edit_mode": "editing {key}",
+        "log_intro": "live files only · colors read from ~/.config/niri/parts/colors.kdl",
+        "theme_missing": "theme-settings was not found in PATH",
+        "add_mode": "adding an app launch binding",
+        "editor_cleared": "app binding editor cleared",
+        "bad_key": "bad key: use something like {key}",
+        "bad_command": "bad command",
+        "key_conflict": "{key} is already used by {command}",
+        "non_app_conflict": "{key} belongs to a non-app binding; quick-settings will not overwrite it",
+        "new_binding": "staged new app binding {key}",
+        "edited_binding": "staged app binding {key}",
+        "deleted_binding": "staged deletion of {key}",
+        "lid_enabled": "staged hyprlock on lid close ({key})",
+        "lid_conflict": "cannot restore {key}: key is already used by {command}",
+        "lid_disabled": "staged hyprlock back on {key}",
+        "nothing_changed": "nothing changed",
+        "write_failed": "write failed: {error}; rolled back",
+        "rolled_back": "{detail}; rolled back",
+        "reload_failed": "niri reload command failed",
+        "applied": "applied {count} file(s)",
+        "build_failed": "cannot build config: {error}",
+    },
+}
+
+UI_LAYOUT = {
+    "top_height": "1",
+    "page_padding": "0 1",
+    "status_height": "1",
+    "status_padding": "0 1",
+    "keys_height": "1",
+    "keys_padding": "0 1",
+    "box_padding": "0 1",
+    "row_height": "1",
+    "table_max_height": "18",
+    "table_key_width": 20,
+    "log_height": "8",
+    "slider_value_width": 6,
+    "input_height": "1",
+    "input_padding": "0 1",
+    "bind_key_width": "16",
+    "bind_command_width": "1fr",
+    "slider_label_width": 25,
+    "slider_bar_left": 29,
+    "slider_bar_width": 18,
+    "toggle_label_width": 31,
+    "action_padding": "0 1",
+    "action_margin_right": "1",
+}
+
+UI_GLYPHS = {
+    "dirty": "●",
+    "slider_left": "◂",
+    "slider_fill": "█",
+    "slider_empty": "░",
+    "slider_right": "▸",
+    "toggle_on": "ON ",
+    "toggle_off": "off",
+    "primary_left": "▌",
+    "primary_right": "▐",
+    "live_marker": "●",
+}
+
+UI_KEYS = {
+    "quit": "q",
+    "colors": "c",
+    "add": "a",
+    "edit": "e",
+    "delete": "d",
+    "apply": "A",
+    "undo": "u",
+    "pointer": "1",
+    "apps": "2",
+    "niri": "3",
+    "lock": "4",
+    "log": "5",
+    "save": "s",
+    "cancel": "c",
+}
+
+UI_CONFIG_DIR = CONFIG / "quick-settings"
+UI_CONFIG_FILE = UI_CONFIG_DIR / "ui.json"
+UI_CONFIG_VERSION = 1
+
+
+def _find_theme_settings_binary() -> str | None:
+    """Find the theme-settings executable in PATH or standard user bin locations."""
+    found = shutil.which("theme-settings")
+    if found:
+        return found
+
+    for candidate in (HOME / ".local/bin/theme-settings", HOME / "bin/theme-settings"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    return None
+
+
+def _deep_merge(defaults: dict, saved: object) -> dict:
+    if not isinstance(saved, dict):
+        return copy.deepcopy(defaults)
+
+    result = copy.deepcopy(defaults)
+    for key, value in saved.items():
+        if key not in result:
+            continue
+        if isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _save_ui_config() -> None:
+    UI_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": UI_CONFIG_VERSION,
+        "text": UI_TEXT,
+        "layout": UI_LAYOUT,
+        "glyphs": UI_GLYPHS,
+        "keys": UI_KEYS,
+    }
+    tmp = UI_CONFIG_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, UI_CONFIG_FILE)
+
+
+def load_ui_config() -> None:
+    global UI_TEXT, UI_LAYOUT, UI_GLYPHS, UI_KEYS
+
+    defaults = {
+        "text": copy.deepcopy(UI_TEXT),
+        "layout": copy.deepcopy(UI_LAYOUT),
+        "glyphs": copy.deepcopy(UI_GLYPHS),
+        "keys": copy.deepcopy(UI_KEYS),
+    }
+
+    if not UI_CONFIG_FILE.is_file():
+        _save_ui_config()
+        return
+
+    try:
+        data = json.loads(UI_CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        _save_ui_config()
+        return
+
+    if not isinstance(data, dict):
+        _save_ui_config()
+        return
+
+    UI_TEXT = _deep_merge(defaults["text"], data.get("text", {}))
+    UI_LAYOUT = _deep_merge(defaults["layout"], data.get("layout", {}))
+    UI_GLYPHS = _deep_merge(defaults["glyphs"], data.get("glyphs", {}))
+    UI_KEYS = _deep_merge(defaults["keys"], data.get("keys", {}))
+
+    _save_ui_config()
+
+
+def ui_text(path: str, **kwargs: object) -> str:
+    value: object = UI_TEXT
+    for part in path.split("."):
+        value = value[part]  # type: ignore[index]
+    text = str(value)
+    return text.format(**kwargs) if kwargs else text
+
+
+# --------------------------- generic helpers ---------------------------
+
+
+def read_text(path: Path, fallback: str = "") -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return fallback
+
+
+def write_atomic(path: Path, text: str) -> None:
+    if path.is_symlink():
+        raise OSError(f"refusing to write through symlink: {path}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o7777 if path.exists() else 0o644
+    tmp = path.with_name(f".{path.name}.quick-settings-tmp")
+
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def run(cmd: list[str], timeout: float = 8.0) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def mix(a: str, b: str, t: float) -> str:
+    def rgb(value: str) -> tuple[int, int, int]:
+        value = value.lstrip("#")
+        return int(value[:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+
+    t = max(0.0, min(1.0, t))
+    ar, br = rgb(a), rgb(b)
+    vals = [round(ar[i] + (br[i] - ar[i]) * t) for i in range(3)]
+    return "#{:02X}{:02X}{:02X}".format(*vals)
+
+
+# --------------------------- KDL block helpers ---------------------------
+
+
+def brace_block(text: str, node: str, start_at: int = 0) -> tuple[int, int] | None:
+    match = re.search(
+        rf"(?m)^[ \t]*{re.escape(node)}[ \t]*\{{",
+        text[start_at:],
+    )
+    if not match:
+        return None
+
+    start = start_at + match.start()
+    opening = start_at + match.end() - 1
+    depth = 0
+    quoted = False
+    escaped = False
+
+    for i in range(opening, len(text)):
+        ch = text[i]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                quoted = False
+            continue
+
+        if ch == '"':
+            quoted = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return start, i + 1
+
+    return None
+
+
+def block_body(text: str, block: tuple[int, int]) -> tuple[int, int]:
+    a, b = block
+    opening = text.find("{", a, b)
+    closing = text.rfind("}", a, b)
+    if opening < 0 or closing < opening:
+        raise ValueError("invalid KDL block")
+    return opening + 1, closing
+
+
+def node_body(text: str, node: str) -> str:
+    block = brace_block(text, node)
+    if not block:
+        return ""
+    a, b = block_body(text, block)
+    return text[a:b]
+
+
+def color_value(text: str, key: str) -> str | None:
+    match = re.search(
+        rf"(?m)^[ \t]*{re.escape(key)}[ \t]+\"?(#[0-9A-Fa-f]{{6,8}})\"?[ \t]*$",
+        text,
+    )
+    if not match:
+        return None
+
+    value = match.group(1).upper()
+    return value[:7] if len(value) == 9 else value
+
+
+def nested_color(text: str, parent: str, child: str, key: str) -> str | None:
+    parent_block = brace_block(text, parent)
+    if not parent_block:
+        return None
+
+    pa, pz = block_body(text, parent_block)
+    parent_text = text[pa:pz]
+    child_block = brace_block(parent_text, child)
+    if not child_block:
+        return None
+
+    ca, cz = block_body(parent_text, child_block)
+    return color_value(parent_text[ca:cz], key)
+
+
+# --------------------------- live palette ---------------------------
+
+
+def load_palette() -> dict[str, str]:
+    palette = dict(STOCK_ROLES)
+    text = read_text(LIVE["colors"], "")
+
+    if not text.strip():
+        return palette
+
+    layout = node_body(text, "layout")
+    background = color_value(layout, "background-color")
+    if background:
+        palette["bg"] = background
+
+    focus_active = nested_color(text, "layout", "focus-ring", "active-color")
+    focus_urgent = nested_color(text, "layout", "focus-ring", "urgent-color")
+    tab_active = nested_color(text, "layout", "tab-indicator", "active-color")
+    tab_inactive = nested_color(text, "layout", "tab-indicator", "inactive-color")
+    tab_urgent = nested_color(text, "layout", "tab-indicator", "urgent-color")
+    insert_hint = nested_color(text, "layout", "insert-hint", "color")
+
+    if focus_active:
+        palette["accent"] = focus_active
+    if tab_active:
+        palette["pink"] = tab_active
+    elif focus_urgent:
+        palette["pink"] = focus_urgent
+    if tab_inactive:
+        palette["selection"] = tab_inactive
+    if tab_urgent:
+        palette["rose"] = tab_urgent
+    elif focus_urgent:
+        palette["rose"] = focus_urgent
+
+    palette["navy"] = mix(palette["bg"], palette["selection"], 0.45)
+    palette["bg_deep"] = mix(palette["bg"], "#000000", 0.30)
+    palette["surface"] = mix(palette["selection"], palette["bg"], 0.45)
+    palette["violet"] = mix(palette["selection"], palette["rose"], 0.35)
+    palette["purple"] = mix(palette["selection"], palette["pink"], 0.30)
+    palette["border_soft"] = mix(palette["navy"], palette["fg_dim"], 0.15)
+    palette["success"] = mix(palette["accent"], palette["fg_bright"], 0.22)
+    palette["warning"] = mix(palette["pink"], palette["fg_bright"], 0.20)
+
+    _ = insert_hint
+    return palette
+
+
+# --------------------------- scalar / flag editing ---------------------------
+
+
+def get_top_scalar(text: str, block_name: str, key: str, default: float) -> float:
+    block = brace_block(text, block_name)
+    if not block:
+        return default
+    a, b = block_body(text, block)
+    match = re.search(
+        rf"(?m)^[ \t]*{re.escape(key)}[ \t]+(-?[0-9]*\.?[0-9]+)[ \t]*$",
+        text[a:b],
+    )
+    return float(match.group(1)) if match else default
+
+
+def set_top_scalar(text: str, block_name: str, key: str, value: str) -> str:
+    block = brace_block(text, block_name)
+    if not block:
+        suffix = "" if text.endswith("\n") else "\n"
+        return text + suffix + f"\n{block_name} {{\n    {key} {value}\n}}\n"
+
+    a, b = block_body(text, block)
+    body = text[a:b]
+    pattern = re.compile(rf"(?m)^([ \t]*){re.escape(key)}[ \t]+.*$")
+
+    if pattern.search(body):
+        body = pattern.sub(rf"\1{key} {value}", body, count=1)
+    else:
+        body = body.rstrip("\n") + f"\n    {key} {value}\n"
+
+    return text[:a] + body + text[b:]
+
+
+def has_top_flag(text: str, block_name: str, key: str, default: bool = False) -> bool:
+    block = brace_block(text, block_name)
+    if not block:
+        return default
+    a, b = block_body(text, block)
+    return re.search(
+        rf"(?m)^[ \t]*{re.escape(key)}(?:[ \t]*//.*)?[ \t]*$",
+        text[a:b],
+    ) is not None
+
+
+def set_top_flag(text: str, block_name: str, key: str, enabled: bool) -> str:
+    block = brace_block(text, block_name)
+    if not block:
+        if not enabled:
+            return text
+        suffix = "" if text.endswith("\n") else "\n"
+        return text + suffix + f"\n{block_name} {{\n    {key}\n}}\n"
+
+    a, b = block_body(text, block)
+    body = text[a:b]
+    pattern = re.compile(
+        rf"(?m)^[ \t]*{re.escape(key)}(?:[ \t]*//.*)?[ \t]*\n?"
+    )
+
+    if enabled:
+        if not pattern.search(body):
+            body = body.rstrip("\n") + f"\n    {key}\n"
+    else:
+        body = pattern.sub("", body)
+
+    return text[:a] + body + text[b:]
+
+
+def get_nested_scalar(text: str, parent: str, child: str, key: str, default: float) -> float:
+    parent_block = brace_block(text, parent)
+    if not parent_block:
+        return default
+
+    pa, pz = block_body(text, parent_block)
+    parent_body = text[pa:pz]
+    child_block = brace_block(parent_body, child)
+    if not child_block:
+        return default
+
+    ca, cz = block_body(parent_body, child_block)
+    match = re.search(
+        rf"(?m)^[ \t]*{re.escape(key)}[ \t]+(-?[0-9]*\.?[0-9]+)[ \t]*$",
+        parent_body[ca:cz],
+    )
+    return float(match.group(1)) if match else default
+
+
+def set_nested_scalar(text: str, parent: str, child: str, key: str, value: str) -> str:
+    parent_block = brace_block(text, parent)
+    if not parent_block:
+        suffix = "" if text.endswith("\n") else "\n"
+        return (
+            text + suffix + f"\n{parent} {{\n"
+            f"    {child} {{\n"
+            f"        {key} {value}\n"
+            "    }\n"
+            "}\n"
+        )
+
+    pa, pz = block_body(text, parent_block)
+    parent_body = text[pa:pz]
+    child_block = brace_block(parent_body, child)
+
+    if not child_block:
+        parent_body = (
+            parent_body.rstrip("\n")
+            + f"\n    {child} {{\n"
+            f"        {key} {value}\n"
+            "    }\n"
+        )
+        return text[:pa] + parent_body + text[pz:]
+
+    ca, cz = block_body(parent_body, child_block)
+    child_body = parent_body[ca:cz]
+    pattern = re.compile(rf"(?m)^([ \t]*){re.escape(key)}[ \t]+.*$")
+
+    if pattern.search(child_body):
+        child_body = pattern.sub(rf"\1{key} {value}", child_body, count=1)
+    else:
+        child_body = child_body.rstrip("\n") + f"\n        {key} {value}\n"
+
+    parent_body = parent_body[:ca] + child_body + parent_body[cz:]
+    return text[:pa] + parent_body + text[pz:]
+
+
+def input_flag(text: str, child: str, key: str, default: bool = False) -> bool:
+    input_block = brace_block(text, "input")
+    if not input_block:
+        return default
+
+    ia, iz = block_body(text, input_block)
+    body = text[ia:iz]
+    child_block = brace_block(body, child)
+    if not child_block:
+        return default
+
+    ca, cz = block_body(body, child_block)
+    return re.search(
+        rf"(?m)^[ \t]*{re.escape(key)}(?:[ \t]*//.*)?[ \t]*$",
+        body[ca:cz],
+    ) is not None
+
+
+def set_input_flag(text: str, child: str, key: str, enabled: bool) -> str:
+    input_block = brace_block(text, "input")
+    if not input_block:
+        return text
+
+    ia, iz = block_body(text, input_block)
+    body = text[ia:iz]
+    child_block = brace_block(body, child)
+
+    if not child_block:
+        if not enabled:
+            return text
+        body = (
+            body.rstrip("\n")
+            + f"\n    {child} {{\n"
+            f"        {key}\n"
+            "    }\n"
+        )
+        return text[:ia] + body + text[iz:]
+
+    ca, cz = block_body(body, child_block)
+    inner = body[ca:cz]
+    pattern = re.compile(
+        rf"(?m)^[ \t]*{re.escape(key)}(?:[ \t]*//.*)?[ \t]*\n?"
+    )
+
+    if enabled:
+        if not pattern.search(inner):
+            inner = inner.rstrip("\n") + f"\n        {key}\n"
+    else:
+        inner = pattern.sub("", inner)
+
+    body = body[:ca] + inner + body[cz:]
+    return text[:ia] + body + text[iz:]
+
+
+def set_focus_mouse(text: str, enabled: bool) -> str:
+    input_block = brace_block(text, "input")
+    if not input_block:
+        return text
+
+    a, b = block_body(text, input_block)
+    body = text[a:b]
+    pattern = re.compile(
+        r'(?m)^([ \t]*)focus-follows-mouse'
+        r'(?:[ \t]+max-scroll-amount="[^"]*")?[ \t]*$'
+    )
+
+    if enabled:
+        replacement = r'\1focus-follows-mouse max-scroll-amount="0%"'
+        if pattern.search(body):
+            body = pattern.sub(replacement, body, count=1)
+        else:
+            body = body.rstrip("\n") + '\n    focus-follows-mouse max-scroll-amount="0%"\n'
+    else:
+        body = pattern.sub("", body)
+
+    return text[:a] + body + text[b:]
+
+
+# --------------------------- app bindings ---------------------------
+
+
+LOCK_KEYS = ("Super+L", "Mod+L")
+
+
+def is_lock_key(key: str) -> bool:
+    return key.lower() in {x.lower() for x in LOCK_KEYS}
+
+
+def is_hyprlock_command(command: str) -> bool:
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    return any(Path(word).name == "hyprlock" for word in words)
+
+
+@dataclass
+class AppBind:
+    key: str
+    command: str
+    line: int
+    action: str = "spawn"
+    original_key: str | None = None
+    original_command: str | None = None
+    original_action: str | None = None
+
+
+BIND_LINE = re.compile(
+    r'^(?P<indent>[ \t]*)'
+    r'(?P<key>[^\s{}]+)[ \t]+\{[ \t]*'
+    r'(?P<action>spawn(?:-sh)?)[ \t]+'
+    r'(?P<cmd>.*?)[ \t]*;?[ \t]*\}[ \t]*$'
+)
+
+
+def display_command(action: str, command: str) -> str:
+    command = command.strip().rstrip(";").strip()
+
+    if action == "spawn-sh":
+        if len(command) >= 2 and command[0] == command[-1] == '"':
+            try:
+                return json.loads(command)
+            except json.JSONDecodeError:
+                return command[1:-1]
+        return command
+
+    try:
+        return " ".join(shlex.split(command))
+    except ValueError:
+        return command
+
+
+def kdl_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def serialize_app(action: str, command: str) -> str:
+    command = command.strip()
+    if action == "spawn-sh":
+        return f"spawn-sh {kdl_quote(command)};"
+
+    try:
+        args = shlex.split(command)
+    except ValueError as exc:
+        raise ValueError(f"invalid app command: {exc}") from exc
+
+    if not args:
+        raise ValueError("app command cannot be empty")
+
+    return "spawn " + " ".join(kdl_quote(arg) for arg in args) + ";"
+
+
+def app_bindings(text: str) -> list[AppBind]:
+    block = brace_block(text, "binds")
+    if not block:
+        return []
+
+    a, b = block_body(text, block)
+    lines = text[a:b].splitlines()
+    offset = text[:a].count("\n")
+    result: list[AppBind] = []
+
+    for idx, line in enumerate(lines):
+        match = BIND_LINE.match(line)
+        if not match:
+            continue
+
+        key = match.group("key")
+        if key.startswith("//"):
+            continue
+
+        action = match.group("action")
+        raw = match.group("cmd").strip().rstrip(";").strip()
+        command = display_command(action, raw)
+
+        result.append(
+            AppBind(
+                key=key,
+                command=command,
+                line=offset + idx,
+                action=action,
+                original_key=key,
+                original_command=command,
+                original_action=action,
+            )
+        )
+
+    return result
+
+
+def all_binding_keys(text: str) -> set[str]:
+    block = brace_block(text, "binds")
+    if not block:
+        return set()
+
+    a, b = block_body(text, block)
+    keys: set[str] = set()
+
+    for line in text[a:b].splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        match = re.match(r'^([^\s{}]+)[ \t]*\{', stripped)
+        if match:
+            keys.add(match.group(1))
+
+    return keys
+
+
+def replace_app_bindings(text: str, desired: list[AppBind]) -> str:
+    block = brace_block(text, "binds")
+
+    if not block:
+        if not desired:
+            return text
+        body = text.rstrip("\n")
+        if body:
+            body += "\n\n"
+        body += "binds {\n"
+        for binding in desired:
+            body += f"    {binding.key} {{ {serialize_app(binding.action, binding.command)} }}\n"
+        return body + "}\n"
+
+    a, b = block_body(text, block)
+    inner = text[a:b]
+    lines = inner.splitlines(keepends=True)
+    offset = text[:a].count("\n")
+
+    original = {x.line - offset: x for x in app_bindings(text)}
+    wanted = {x.line - offset: x for x in desired if x.line >= 0}
+    out: list[str] = []
+
+    for idx, line in enumerate(lines):
+        old = original.get(idx)
+        if old is None:
+            out.append(line)
+            continue
+
+        new = wanted.get(idx)
+        if new is None:
+            continue
+
+        same = (
+            old.key == new.key
+            and old.action == new.action
+            and display_command(old.action, old.command)
+            == display_command(new.action, new.command)
+        )
+
+        if same:
+            out.append(line)
+        else:
+            ending = "\n" if line.endswith("\n") else ""
+            out.append(
+                f"    {new.key} {{ {serialize_app(new.action, new.command)} }}{ending}"
+            )
+
+    for new in desired:
+        if new.line >= 0:
+            continue
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        out.append(
+            f"    {new.key} {{ {serialize_app(new.action, new.command)} }}\n"
+        )
+
+    return text[:a] + "".join(out) + text[b:]
+
+
+# --------------------------- lid-close hyprlock ---------------------------
+
+
+def _hyprlock_action_line(line: str) -> tuple[str, str] | None:
+    match = re.match(
+        r'^[ \t]*(spawn(?:-sh)?)[ \t]+(.+?);?[ \t]*$',
+        line,
+    )
+    if not match:
+        return None
+
+    action = match.group(1)
+    raw = match.group(2).strip().rstrip(";").strip()
+    command = display_command(action, raw)
+    return (action, command) if is_hyprlock_command(command) else None
+
+
+def find_hyprlock_app_binding(text: str) -> AppBind | None:
+    for binding in app_bindings(text):
+        if is_lock_key(binding.key) and is_hyprlock_command(binding.command):
+            return binding
+    return None
+
+
+def find_lid_hyprlock(text: str) -> AppBind | None:
+    switch = brace_block(text, "switch-events")
+    if not switch:
+        return None
+
+    a, b = block_body(text, switch)
+    body = text[a:b]
+    lid = brace_block(body, "lid-close")
+    if not lid:
+        return None
+
+    la, lb = block_body(body, lid)
+    for line in body[la:lb].splitlines():
+        parsed = _hyprlock_action_line(line)
+        if parsed:
+            action, command = parsed
+            return AppBind("lid-close", command, -1, action)
+
+    return None
+
+
+def serialize_switch_action(action: str, command: str) -> str:
+    if action == "spawn-sh":
+        return f"spawn-sh {kdl_quote(command)};"
+    args = shlex.split(command)
+    if not args:
+        raise ValueError("hyprlock command cannot be empty")
+    return "spawn " + " ".join(kdl_quote(arg) for arg in args) + ";"
+
+
+def set_lid_hyprlock(text: str, enabled: bool, binding: AppBind) -> str:
+    switch = brace_block(text, "switch-events")
+
+    if enabled:
+        action = serialize_switch_action(binding.action, binding.command)
+
+        if not switch:
+            suffix = "" if text.endswith("\n") else "\n"
+            return (
+                text
+                + suffix
+                + "\nswitch-events {\n"
+                + "    lid-close {\n"
+                + f"        {action}\n"
+                + "    }\n"
+                + "}\n"
+            )
+
+        sa, sb = block_body(text, switch)
+        body = text[sa:sb]
+        lid = brace_block(body, "lid-close")
+
+        if not lid:
+            body = (
+                body.rstrip("\n")
+                + "\n\n    lid-close {\n"
+                + f"        {action}\n"
+                + "    }\n"
+            )
+            return text[:sa] + body + text[sb:]
+
+        la, lb = block_body(body, lid)
+        inner = body[la:lb]
+        lines = inner.splitlines(keepends=True)
+        out: list[str] = []
+        replaced = False
+
+        for line in lines:
+            parsed = _hyprlock_action_line(line)
+            if parsed:
+                if replaced:
+                    continue
+                indent_match = re.match(r"^([ \t]*)", line)
+                indent = indent_match.group(1) if indent_match else "        "
+                ending = "\n" if line.endswith("\n") else ""
+                out.append(
+                    indent
+                    + serialize_switch_action(binding.action, binding.command)
+                    + ending
+                )
+                replaced = True
+            else:
+                out.append(line)
+
+        if not replaced:
+            if out and not out[-1].endswith("\n"):
+                out[-1] += "\n"
+            out.append(
+                "        "
+                + serialize_switch_action(binding.action, binding.command)
+                + "\n"
+            )
+
+        new_body = body[:la] + "".join(out) + body[lb:]
+        return text[:sa] + new_body + text[sb:]
+
+    if not switch:
+        return text
+
+    sa, sb = block_body(text, switch)
+    body = text[sa:sb]
+    lid = brace_block(body, "lid-close")
+    if not lid:
+        return text
+
+    la, lb = block_body(body, lid)
+    inner = body[la:lb]
+    out = []
+    removed = False
+
+    for line in inner.splitlines(keepends=True):
+        if _hyprlock_action_line(line):
+            removed = True
+            continue
+        out.append(line)
+
+    if not removed:
+        return text
+
+    new_inner = "".join(out)
+    if new_inner.strip():
+        new_body = body[:la] + new_inner + body[lb:]
+    else:
+        new_body = body[:lid[0]] + body[lid[1]:]
+
+    if not new_body.strip():
+        return text[:switch[0]] + text[switch[1]:]
+
+    return text[:sa] + new_body + text[sb:]
+
+
+# --------------------------- backup / undo ---------------------------
+
+
+def make_backup(changes: dict[Path, str]) -> Path:
+    STATE.mkdir(parents=True, exist_ok=True)
+    BACKUPS.mkdir(parents=True, exist_ok=True)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out = BACKUPS / stamp
+    n = 2
+    while out.exists():
+        out = BACKUPS / f"{stamp}-{n}"
+        n += 1
+
+    out.mkdir(parents=True)
+    manifest: list[dict[str, str | None]] = []
+
+    for path in changes:
+        if path.exists():
+            backup = out / str(path).lstrip("/")
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, backup)
+            manifest.append({"path": str(path), "backup": str(backup)})
+        else:
+            manifest.append({"path": str(path), "backup": None})
+
+    (out / "manifest.json").write_text(
+        json.dumps(manifest, indent=2),
+        encoding="utf-8",
+    )
+    return out
+
+
+def restore_last() -> str:
+    dirs = (
+        sorted(
+            d for d in BACKUPS.iterdir()
+            if d.is_dir() and (d / "manifest.json").is_file()
+        )
+        if BACKUPS.is_dir()
+        else []
+    )
+
+    if not dirs:
+        return "nothing to undo"
+
+    d = dirs[-1]
+    try:
+        manifest = json.loads(
+            (d / "manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return "last backup is invalid"
+
+    count = 0
+    for item in manifest:
+        path = Path(item["path"]).expanduser()
+        backup = item.get("backup")
+
+        if path not in WRITABLE_LIVE:
+            continue
+        if path.is_symlink():
+            continue
+
+        if backup and Path(backup).is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup, path)
+            count += 1
+        elif backup is None and path.exists():
+            path.unlink()
+            count += 1
+
+    shutil.rmtree(d, ignore_errors=True)
+    reload_niri()
+    return f"undid last change ({count} file(s))"
+
+
+def validate_niri() -> tuple[bool, str]:
+    if not shutil.which("niri"):
+        return True, "niri not found; validation skipped"
+
+    result = run(["niri", "validate"], timeout=8)
+    if result is None:
+        return True, "could not run niri validate; validation skipped"
+    if result.returncode == 0:
+        return True, "niri config valid"
+
+    msg = (result.stderr or result.stdout or "niri validation failed").strip()
+    lines = msg.splitlines()
+    return False, lines[-1] if lines else "niri validation failed"
+
+
+def reload_niri() -> bool:
+    if not shutil.which("niri"):
+        return True
+
+    result = run(
+        ["niri", "msg", "action", "load-config-file"],
+        timeout=8,
+    )
+    return result is not None and result.returncode == 0
+
+
+# --------------------------- TUI ---------------------------
+
+
+def run_tui() -> int:
+    load_ui_config()
+
+    try:
+        from rich.text import Text
+        from textual import on
+        from textual.app import App, ComposeResult
+        from textual.binding import Binding
+        from textual.containers import Horizontal, Vertical, VerticalScroll
+        from textual.message import Message
+        from textual.theme import Theme
+        from textual.widgets import DataTable, Input, RichLog, Static
+    except ImportError:
+        print("missing Textual. install it with: sudo pacman -S python-textual")
+        return 1
+
+    def build_ui_css() -> str:
+        l = UI_LAYOUT
+        return f"""
+        Screen {{ background: ansi_default; color: $foreground; layout: vertical; }}
+        #top {{ height: {l['top_height']}; background: ansi_default; }}
+        #top-left {{ width: 1fr; height: {l['top_height']}; background: ansi_default; }}
+        #page {{ height: 1fr; padding: {l['page_padding']}; background: ansi_default; scrollbar-size-vertical: 1;
+                scrollbar-background: ansi_default; scrollbar-color: $box; scrollbar-color-hover: $acc; }}
+        #status {{ height: {l['status_height']}; padding: {l['status_padding']}; color: $dim; background: ansi_default; }}
+        #keys {{ height: {l['keys_height']}; padding: {l['keys_padding']}; color: $dim; background: ansi_default; }}
+        .box {{ border: solid $box; border-title-color: $dim; background: ansi_default; padding: {l['box_padding']}; height: auto; }}
+        .box:focus-within {{ border: solid $boxhi; }}
+        .row {{ height: {l['row_height']}; background: ansi_default; }}
+        Slider, Toggle {{ height: {l['row_height']}; background: ansi_default; }}
+        Slider:hover, Toggle:hover, Slider:focus, Toggle:focus {{ background: $sel; }}
+        DataTable {{ height: auto; max-height: {l['table_max_height']}; background: ansi_default; border: none; padding: 0;
+                    scrollbar-size-vertical: 1; scrollbar-background: ansi_default; scrollbar-color: $box; }}
+        DataTable > .datatable--header {{ background: ansi_default; color: $dim; text-style: bold; }}
+        DataTable > .datatable--cursor {{ background: $sel; color: $fgb; text-style: bold; }}
+        DataTable:focus > .datatable--cursor {{ background: $sel; color: $acc; }}
+        Input {{ background: ansi_default; border: none; height: {l['input_height']}; padding: {l['input_padding']}; color: $foreground; }}
+        Input:focus {{ background: $sel; }}
+        #bind-key {{ width: {l['bind_key_width']}; }}
+        #bind-command {{ width: {l['bind_command_width']}; }}
+        #apps-help {{ color: $dim; height: {l['row_height']}; }}
+        RichLog {{ height: {l['log_height']}; background: ansi_default; border: none; color: $foreground; padding: 0; }}
+        VerticalScroll, Vertical, Horizontal, Static {{ background: ansi_default; }}
+        Action {{ width: auto; height: {l['row_height']}; padding: {l['action_padding']}; margin-right: {l['action_margin_right']}; background: ansi_default; }}
+        Action:hover {{ background: $sel; }}
+        Action:focus {{ background: $sel; text-style: underline; }}
+        """
+
+    class Action(Static, can_focus=True):
+        class Pressed(Message):
+            def __init__(self, sender: "Action") -> None:
+                super().__init__()
+                self.sender = sender
+
+        BINDINGS = [
+            Binding("enter", "press", show=False),
+            Binding("space", "press", show=False),
+        ]
+
+        def __init__(self, label: str, hot: str = "", id: str | None = None, primary: bool = False):
+            super().__init__("", id=id)
+            self.label = label
+            self.hot = hot
+            self.primary = primary
+
+        def redraw(self) -> None:
+            r = self.app.pal
+            if self.primary:
+                self.update(Text(f"{UI_GLYPHS['primary_left']}{self.label}{UI_GLYPHS['primary_right']}", style=f"bold {r['accent']}"))
+                return
+
+            t = Text()
+            lit = False
+            for ch in self.label:
+                if self.hot and not lit and ch.lower() == self.hot.lower():
+                    t.append(ch, style=f"bold {r['accent']}")
+                    lit = True
+                else:
+                    t.append(ch, style=r["fg"])
+            self.update(t)
+
+        def on_mount(self) -> None:
+            self.redraw()
+
+        def on_click(self, _event) -> None:
+            self.post_message(self.Pressed(self))
+
+        def action_press(self) -> None:
+            self.post_message(self.Pressed(self))
+
+    class Slider(Static, can_focus=True):
+        class Changed(Message):
+            def __init__(self, sender: "Slider") -> None:
+                super().__init__()
+                self.sender = sender
+
+        BINDINGS = [
+            Binding("left,h", "step(-1)", show=False),
+            Binding("right,l", "step(1)", show=False),
+            Binding("shift+left,H", "step(-5)", show=False),
+            Binding("shift+right,L", "step(5)", show=False),
+            Binding("x", "reset", show=False),
+        ]
+
+        def __init__(self, key: str, label: str, lo: float, hi: float, step: float, value: float, integer: bool = False):
+            super().__init__("", id=f"slider-{key}")
+            self.key = key
+            self.label = label
+            self.lo = lo
+            self.hi = hi
+            self.step_value = step
+            self.value = value
+            self.saved = value
+            self.integer = integer
+
+        def redraw(self) -> None:
+            r = self.app.pal
+            width = int(self.app.ui_layout["slider_bar_width"])
+            frac = (self.value - self.lo) / max(0.001, self.hi - self.lo)
+            fill = round(width * max(0.0, min(1.0, frac)))
+            changed = abs(self.value - self.saved) > self.step_value / 3
+
+            if self.integer:
+                val = f"{self.value:.0f}"
+            elif self.lo < 0:
+                val = f"{self.value:+.2f}"
+            else:
+                val = f"{self.value:.2f}"
+
+            t = Text()
+            t.append(UI_GLYPHS["dirty"] + " " if changed else "  ", style=r["warning"])
+            t.append(self.label.ljust(int(self.app.ui_layout["slider_label_width"])), style=r["fg_bright"])
+            t.append(UI_GLYPHS["slider_left"] + " ", style=r["accent"])
+            t.append(UI_GLYPHS["slider_fill"] * fill, style=r["accent"])
+            t.append(UI_GLYPHS["slider_empty"] * (width - fill), style=r["violet"])
+            t.append(" " + UI_GLYPHS["slider_right"] + " ", style=r["accent"])
+            t.append(val.rjust(int(self.app.ui_layout["slider_value_width"])), style=r["fg_bright"])
+            self.update(t)
+
+        def set_value(self, value: float, notify: bool = True) -> None:
+            self.value = round(max(self.lo, min(self.hi, value)), 2)
+            self.redraw()
+            if notify:
+                self.post_message(self.Changed(self))
+
+        def action_step(self, direction: int) -> None:
+            self.set_value(self.value + direction * self.step_value)
+
+        def action_reset(self) -> None:
+            self.set_value(self.saved)
+
+        def on_click(self, event) -> None:
+            bar_left = 29
+            bar_width = int(self.app.ui_layout["slider_bar_width"])
+            if not (bar_left <= event.x < bar_left + bar_width):
+                return
+            frac = (event.x - bar_left + 0.5) / bar_width
+            self.set_value(self.lo + (self.hi - self.lo) * max(0.0, min(1.0, frac)))
+
+    class Toggle(Static, can_focus=True):
+        class Changed(Message):
+            def __init__(self, sender: "Toggle") -> None:
+                super().__init__()
+                self.sender = sender
+
+        BINDINGS = [
+            Binding("enter,space", "toggle", show=False),
+            Binding("x", "reset", show=False),
+        ]
+
+        def __init__(self, key: str, label: str, value: bool):
+            super().__init__("", id=f"toggle-{key}")
+            self.key = key
+            self.label = label
+            self.value = value
+            self.saved = value
+
+        def redraw(self) -> None:
+            r = self.app.pal
+            dirty = self.value != self.saved
+            state = UI_GLYPHS["toggle_on"] if self.value else UI_GLYPHS["toggle_off"]
+            t = Text()
+            t.append(UI_GLYPHS["dirty"] + " " if dirty else "  ", style=r["warning"])
+            t.append(self.label.ljust(int(self.app.ui_layout["toggle_label_width"])), style=r["fg_bright"])
+            t.append(
+                f"[{state}]",
+                style=f"bold {r['accent'] if self.value else r['fg_dim']}",
+            )
+            self.update(t)
+
+        def set_value(self, value: bool, notify: bool = False) -> None:
+            self.value = bool(value)
+            self.redraw()
+            if notify:
+                self.post_message(self.Changed(self))
+
+        def action_toggle(self) -> None:
+            self.set_value(not self.value, True)
+
+        def action_reset(self) -> None:
+            self.set_value(self.saved, True)
+
+        def on_click(self, _event) -> None:
+            self.action_toggle()
+
+    class AppTable(DataTable):
+        BINDINGS = [
+            Binding("j,down", "cursor_down", show=False),
+            Binding("k,up", "cursor_up", show=False),
+            Binding(UI_KEYS["add"], "add_bind", show=False),
+            Binding(UI_KEYS["edit"], "edit_bind", show=False),
+            Binding(UI_KEYS["delete"], "delete_bind", show=False),
+        ]
+
+        def current_index(self) -> int | None:
+            try:
+                row_key = self.coordinate_to_cell_key(self.cursor_coordinate).row_key.value
+                match = re.fullmatch(r"bind-(\d+)", str(row_key))
+                if match:
+                    idx = int(match.group(1))
+                    if 0 <= idx < len(self.app.app_bindings):
+                        return idx
+            except Exception:
+                pass
+            return None
+
+        def action_add_bind(self) -> None:
+            self.app.edit_binding(None)
+
+        def action_edit_bind(self) -> None:
+            self.app.edit_binding(self.current_index())
+
+        def action_delete_bind(self) -> None:
+            self.app.delete_binding(self.current_index())
+
+    class QuickSettings(App):
+        TITLE = UI_TEXT["title"]
+        APP_NAME = UI_TEXT["title"]
+        ansi_color = True
+
+        CSS = build_ui_css()
+
+        BINDINGS = [
+            Binding(UI_KEYS["quit"], "quit", ui_text("header.quit")),
+            Binding(UI_KEYS["colors"], "theme_settings", ui_text("header.colors"), show=False),
+            Binding(UI_KEYS["add"], "add_bind", ui_text("actions.add_app"), show=False),
+            Binding(UI_KEYS["edit"], "edit_bind", ui_text("actions.edit_app"), show=False),
+            Binding(UI_KEYS["delete"], "delete_bind", ui_text("actions.delete_app"), show=False),
+            Binding(UI_KEYS["apply"], "apply", ui_text("bottom.apply")),
+            Binding(UI_KEYS["undo"], "undo", ui_text("bottom.undo")),
+            Binding(UI_KEYS["pointer"], "section_pointer", show=False),
+            Binding(UI_KEYS["apps"], "section_apps", show=False),
+            Binding(UI_KEYS["niri"], "section_niri", show=False),
+            Binding(UI_KEYS["lock"], "section_lock", show=False),
+            Binding(UI_KEYS["log"], "section_log", show=False),
+            Binding("ctrl+s", "apply", show=False),
+        ]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.pal = load_palette()
+            self.saved_snapshot: tuple = ()
+            self.ui_layout = UI_LAYOUT
+            self.ui_text = ui_text
+            self.app_bindings: list[AppBind] = []
+            self.editing_index: int | None = None
+            self.editing_action = "spawn"
+            self.status_text = ui_text("status.ready")
+            self.launch_theme_settings = False
+            self.theme_settings_path: str | None = None
+            self.wear_theme()
+            self.load_from_live()
+
+        def wear_theme(self) -> None:
+            r = self.pal
+            self.register_theme(
+                Theme(
+                    name="alice-settings",
+                    dark=True,
+                    primary=r["accent"],
+                    secondary=r["pink"],
+                    accent=r["accent"],
+                    warning=r["warning"],
+                    error=r["pink"],
+                    success=r["success"],
+                    foreground=r["fg"],
+                    background=r["bg"],
+                    surface=r["bg_deep"],
+                    panel=r["navy"],
+                    variables={
+                        "acc": r["accent"],
+                        "box": mix(r["violet"], r["fg_dim"], 0.30),
+                        "boxhi": r["accent"],
+                        "dim": mix(r["fg_dim"], r["bg"], 0.25),
+                        "sel": r["selection"],
+                        "ok": r["success"],
+                        "warn": r["warning"],
+                        "fgb": r["fg_bright"],
+                        "bgc": r["bg"],
+                    },
+                )
+            )
+            self.theme = "alice-settings"
+
+        def load_from_live(self) -> None:
+            inp = read_text(
+                LIVE["input"],
+                "input {\n    mouse {}\n    touchpad {}\n}\n",
+            )
+            layout = read_text(LIVE["layout"], "layout {\n}\n")
+            overview = read_text(LIVE["overview"], "overview {\n}\n")
+            apps = read_text(LIVE["apps"], "binds {\n}\n")
+
+            self.mouse_speed = get_nested_scalar(inp, "input", "mouse", "accel-speed", 0.0)
+            self.touchpad_speed = get_nested_scalar(inp, "input", "touchpad", "accel-speed", 0.0)
+            self.mouse_natural = input_flag(inp, "mouse", "natural-scroll", False)
+            self.touchpad_natural = input_flag(inp, "touchpad", "natural-scroll", False)
+            self.touchpad_tap = input_flag(inp, "touchpad", "tap", False)
+            self.focus_mouse = has_top_flag(inp, "input", "focus-follows-mouse", False)
+            self.gaps = get_top_scalar(layout, "layout", "gaps", 8.0)
+            self.zoom = get_top_scalar(overview, "overview", "zoom", 0.40)
+
+            app_lock = find_hyprlock_app_binding(apps)
+            lid_lock = find_lid_hyprlock(apps)
+            template = lid_lock or app_lock or AppBind("Super+L", "hyprlock", -1, "spawn")
+
+            self.lock_key = app_lock.key if app_lock else getattr(self, "lock_key", "Super+L")
+            self.lock_action = template.action
+            self.lock_command = template.command
+            self.lid_lock = lid_lock is not None
+
+            self.app_bindings = app_bindings(apps)
+            if self.lid_lock:
+                self.app_bindings = [
+                    b for b in self.app_bindings
+                    if not (is_lock_key(b.key) and is_hyprlock_command(b.command))
+                ]
+
+            self.saved_snapshot = self.snapshot()
+
+        def _update_saved_widget_values(self) -> None:
+            for key, value in [
+                ("mouse-speed", self.mouse_speed),
+                ("touchpad-speed", self.touchpad_speed),
+                ("gaps", self.gaps),
+                ("zoom", self.zoom),
+            ]:
+                slider = self.query_one(f"#slider-{key}", Slider)
+                slider.saved = value
+                slider.value = value
+            for key, value in [
+                ("mouse-natural", self.mouse_natural),
+                ("touchpad-natural", self.touchpad_natural),
+                ("touchpad-tap", self.touchpad_tap),
+                ("focus-mouse", self.focus_mouse),
+                ("hyprlock-lid", self.lid_lock),
+            ]:
+                toggle = self.query_one(f"#toggle-{key}", Toggle)
+                toggle.saved = value
+                toggle.value = value
+
+        def snapshot(self) -> tuple:
+            return (
+                round(self.mouse_speed, 2),
+                round(self.touchpad_speed, 2),
+                self.mouse_natural,
+                self.touchpad_natural,
+                self.touchpad_tap,
+                self.focus_mouse,
+                round(self.gaps, 2),
+                round(self.zoom, 2),
+                self.lid_lock,
+                self.lock_key,
+                self.lock_action,
+                self.lock_command,
+                tuple((b.key, b.command, b.action) for b in self.app_bindings),
+            )
+
+        def dirty(self) -> bool:
+            return self.snapshot() != self.saved_snapshot
+
+        def compose(self) -> ComposeResult:
+            with Horizontal(id="top"):
+                yield Static(id="top-left")
+                yield Action(UI_TEXT["header"]["colors"], UI_KEYS["colors"], id="theme-settings")
+                yield Action(UI_TEXT["header"]["quit"], UI_KEYS["quit"], id="quit")
+
+            with VerticalScroll(id="page"):
+                with Vertical(classes="box") as pointer:
+                    pointer.border_title = UI_TEXT["sections"]["pointer"]
+                    yield Slider("mouse-speed", UI_TEXT["pointer"]["mouse_speed"], -1.0, 1.0, 0.05, self.mouse_speed)
+                    yield Slider("touchpad-speed", UI_TEXT["pointer"]["touchpad_speed"], -1.0, 1.0, 0.05, self.touchpad_speed)
+                    yield Toggle("mouse-natural", UI_TEXT["pointer"]["mouse_natural"], self.mouse_natural)
+                    yield Toggle("touchpad-natural", UI_TEXT["pointer"]["touchpad_natural"], self.touchpad_natural)
+                    yield Toggle("touchpad-tap", UI_TEXT["pointer"]["touchpad_tap"], self.touchpad_tap)
+                    yield Toggle("focus-mouse", UI_TEXT["pointer"]["focus_mouse"], self.focus_mouse)
+
+                with Vertical(classes="box") as apps:
+                    apps.border_title = UI_TEXT["sections"]["apps"]
+                    yield AppTable(id="apps-table", cursor_type="row")
+                    with Horizontal(classes="row"):
+                        yield Input(placeholder=UI_TEXT["apps"]["key_placeholder"], id="bind-key")
+                        yield Input(placeholder=UI_TEXT["apps"]["command_placeholder"], id="bind-command")
+                        yield Action(UI_TEXT["apps"]["save"], UI_KEYS["save"], id="bind-save", primary=True)
+                        yield Action(UI_TEXT["apps"]["cancel"], UI_KEYS["cancel"], id="bind-cancel")
+                    yield Static(UI_TEXT["apps"]["help"], id="apps-help")
+
+                with Vertical(classes="box") as niri:
+                    niri.border_title = UI_TEXT["sections"]["niri"]
+                    yield Slider("gaps", UI_TEXT["niri"]["gaps"], 0, 80, 1, self.gaps, integer=True)
+                    yield Slider("zoom", UI_TEXT["niri"]["zoom"], 0.10, 1.00, 0.05, self.zoom)
+
+                with Vertical(classes="box") as lock:
+                    lock.border_title = UI_TEXT["sections"]["lock"]
+                    yield Toggle("hyprlock-lid", UI_TEXT["lock"]["lid"], self.lid_lock)
+                    yield Static(UI_TEXT["lock"]["description"])
+
+                with Vertical(classes="box") as logbox:
+                    logbox.border_title = UI_TEXT["sections"]["log"]
+                    yield RichLog(id="log", wrap=False, markup=False, highlight=False)
+
+            with Horizontal(classes="row"):
+                yield Action(UI_TEXT["bottom"]["apply"], UI_KEYS["apply"].lower(), id="apply", primary=True)
+                yield Action(UI_TEXT["bottom"]["undo"], UI_KEYS["undo"], id="undo")
+                yield Static(id="status")
+            yield Static(id="keys")
+
+        def on_mount(self) -> None:
+            self._update_saved_widget_values()
+            self.refresh_app_table()
+            self.refresh_all()
+            self.status(ui_text("status.ready"))
+            self.query_one("#log", RichLog).write(ui_text("status.log_intro"))
+            self.query_one("#slider-mouse-speed", Slider).focus()
+
+        @on(Slider.Changed)
+        def _slider_changed(self, event: Slider.Changed) -> None:
+            slider = event.sender
+            if slider.key == "mouse-speed":
+                self.mouse_speed = slider.value
+            elif slider.key == "touchpad-speed":
+                self.touchpad_speed = slider.value
+            elif slider.key == "gaps":
+                self.gaps = slider.value
+            elif slider.key == "zoom":
+                self.zoom = slider.value
+            self.refresh_all()
+
+        @on(Toggle.Changed)
+        def _toggle_changed(self, event: Toggle.Changed) -> None:
+            toggle = event.sender
+            if toggle.key == "mouse-natural":
+                self.mouse_natural = toggle.value
+            elif toggle.key == "touchpad-natural":
+                self.touchpad_natural = toggle.value
+            elif toggle.key == "touchpad-tap":
+                self.touchpad_tap = toggle.value
+            elif toggle.key == "focus-mouse":
+                self.focus_mouse = toggle.value
+            elif toggle.key == "hyprlock-lid":
+                self.set_lid_lock(toggle.value)
+            self.refresh_all()
+
+        @on(Action.Pressed)
+        def _action(self, event: Action.Pressed) -> None:
+            actions = {
+                "quit": self.action_quit,
+                "theme-settings": self.action_theme_settings,
+                "apply": self.action_apply,
+                "undo": self.action_undo,
+                "bind-save": self.save_binding,
+                "bind-cancel": self.cancel_binding,
+            }
+            fn = actions.get(event.sender.id)
+            if fn:
+                fn()
+
+        @on(Input.Submitted, "#bind-command")
+        def _bind_command_submit(self, _event: Input.Submitted) -> None:
+            self.save_binding()
+
+        def refresh_app_table(self) -> None:
+            table = self.query_one("#apps-table", AppTable)
+            table.clear(columns=True)
+            table.add_column(UI_TEXT["apps"]["key_column"], key="key", width=int(self.ui_layout.get("table_key_width", 20)) if hasattr(self, "ui_layout") else 20)
+            table.add_column(UI_TEXT["apps"]["command_column"], key="cmd")
+            for idx, binding in enumerate(self.app_bindings):
+                table.add_row(binding.key, binding.command, key=f"bind-{idx}")
+
+        def edit_binding(self, index: int | None) -> None:
+            key_input = self.query_one("#bind-key", Input)
+            cmd_input = self.query_one("#bind-command", Input)
+
+            if index is None:
+                self.editing_index = None
+                self.editing_action = "spawn"
+                key_input.value = ""
+                cmd_input.value = ""
+                key_input.focus()
+                self.status(ui_text("status.add_mode"))
+                return
+
+            if not (0 <= index < len(self.app_bindings)):
+                return
+
+            binding = self.app_bindings[index]
+            self.editing_index = index
+            self.editing_action = binding.action
+            key_input.value = binding.key
+            cmd_input.value = binding.command
+            key_input.focus()
+            self.status(ui_text("status.edit_mode", key=binding.key))
+
+        def save_binding(self) -> None:
+            key = re.sub(r"\s+", "", self.query_one("#bind-key", Input).value.strip())
+            command = self.query_one("#bind-command", Input).value.strip()
+
+            if not key or any(ch in key for ch in '{}"'):
+                self.status(ui_text("status.bad_key", key="Super+T"))
+                return
+            if not command or any(ch in command for ch in "\n{}"):
+                self.status(ui_text("status.bad_command"))
+                return
+
+            for idx, binding in enumerate(self.app_bindings):
+                if self.editing_index is not None and idx == self.editing_index:
+                    continue
+                if binding.key == key:
+                    self.status(ui_text("status.key_conflict", key=key, command=binding.command))
+                    return
+
+            live_apps = read_text(LIVE["apps"], "binds {\n}\n")
+            all_keys = all_binding_keys(live_apps)
+            app_keys = {b.key for b in app_bindings(live_apps)}
+            if key in all_keys and key not in app_keys:
+                self.status(ui_text("status.non_app_conflict", key=key))
+                return
+
+            if self.editing_index is None:
+                self.app_bindings.append(AppBind(key, command, -1, "spawn"))
+                self.status(ui_text("status.new_binding", key=key))
+            else:
+                binding = self.app_bindings[self.editing_index]
+                binding.key = key
+                binding.command = command
+                binding.action = self.editing_action
+                self.status(ui_text("status.edited_binding", key=key))
+
+            self.editing_index = None
+            self.editing_action = "spawn"
+            self.query_one("#bind-key", Input).value = ""
+            self.query_one("#bind-command", Input).value = ""
+            self.refresh_app_table()
+            self.refresh_all()
+
+        def cancel_binding(self) -> None:
+            self.editing_index = None
+            self.query_one("#bind-key", Input).value = ""
+            self.query_one("#bind-command", Input).value = ""
+            self.status(ui_text("status.editor_cleared"))
+
+        def delete_binding(self, index: int | None) -> None:
+            if index is None or not (0 <= index < len(self.app_bindings)):
+                return
+            key = self.app_bindings[index].key
+            del self.app_bindings[index]
+            self.editing_index = None
+            self.status(ui_text("status.deleted_binding", key=key))
+            self.refresh_app_table()
+            self.refresh_all()
+
+        def set_lid_lock(self, enabled: bool) -> None:
+            enabled = bool(enabled)
+            if enabled == self.lid_lock:
+                return
+
+            if enabled:
+                current = next(
+                    (
+                        b for b in self.app_bindings
+                        if is_lock_key(b.key) and is_hyprlock_command(b.command)
+                    ),
+                    None,
+                )
+
+                if current:
+                    self.lock_key = current.key
+                    self.lock_action = current.action
+                    self.lock_command = current.command
+                    self.app_bindings = [b for b in self.app_bindings if b is not current]
+
+                self.lid_lock = True
+                self.status(ui_text("status.lid_enabled", key=self.lock_key))
+            else:
+                conflict = next((b for b in self.app_bindings if b.key == self.lock_key), None)
+                if conflict:
+                    self.status(ui_text("status.lid_conflict", key=self.lock_key, command=conflict.command))
+                    self.query_one("#toggle-hyprlock-lid", Toggle).set_value(True, notify=False)
+                    return
+
+                self.app_bindings.append(
+                    AppBind(self.lock_key, self.lock_command, -1, self.lock_action)
+                )
+                self.lid_lock = False
+                self.status(ui_text("status.lid_disabled", key=self.lock_key))
+
+        def build_changes(self) -> dict[Path, str]:
+            inp = read_text(
+                LIVE["input"],
+                "input {\n    mouse {}\n    touchpad {}\n}\n",
+            )
+            inp = set_nested_scalar(inp, "input", "mouse", "accel-speed", f"{self.mouse_speed:.2f}")
+            inp = set_nested_scalar(inp, "input", "touchpad", "accel-speed", f"{self.touchpad_speed:.2f}")
+            inp = set_input_flag(inp, "mouse", "natural-scroll", self.mouse_natural)
+            inp = set_input_flag(inp, "touchpad", "natural-scroll", self.touchpad_natural)
+            inp = set_input_flag(inp, "touchpad", "tap", self.touchpad_tap)
+            inp = set_focus_mouse(inp, self.focus_mouse)
+
+            layout = set_top_scalar(
+                read_text(LIVE["layout"], "layout {\n}\n"),
+                "layout",
+                "gaps",
+                f"{self.gaps:.0f}",
+            )
+            overview = set_top_scalar(
+                read_text(LIVE["overview"], "overview {\n}\n"),
+                "overview",
+                "zoom",
+                f"{self.zoom:.2f}",
+            )
+
+            apps_original = read_text(LIVE["apps"], "binds {\n}\n")
+            live_apps = app_bindings(apps_original)
+            by_line = {b.line: b for b in live_apps}
+            by_key = {b.key: b for b in live_apps}
+            used: set[int] = set()
+            final: list[AppBind] = []
+
+            for staged in self.app_bindings:
+                old = None
+                if staged.line >= 0 and staged.line in by_line and staged.line not in used:
+                    old = by_line[staged.line]
+                if old is None:
+                    old = by_key.get(staged.original_key or staged.key)
+                    if old is not None and old.line in used:
+                        old = None
+
+                if old is not None:
+                    used.add(old.line)
+                    final.append(
+                        AppBind(
+                            staged.key,
+                            staged.command,
+                            old.line,
+                            staged.action,
+                            old.original_key,
+                            old.original_command,
+                            old.original_action,
+                        )
+                    )
+                else:
+                    final.append(AppBind(staged.key, staged.command, -1, staged.action))
+
+            if self.lid_lock:
+                final = [
+                    b for b in final
+                    if not (is_lock_key(b.key) and is_hyprlock_command(b.command))
+                ]
+
+            apps = replace_app_bindings(apps_original, final)
+            template = AppBind(self.lock_key, self.lock_command, -1, self.lock_action)
+            apps = set_lid_hyprlock(apps, self.lid_lock, template)
+
+            pairs = {
+                LIVE["input"]: inp,
+                LIVE["apps"]: apps,
+                LIVE["layout"]: layout,
+                LIVE["overview"]: overview,
+            }
+
+            return {
+                path: new
+                for path, new in pairs.items()
+                if read_text(path) != new
+            }
+
+        def apply_changes(self, changes: dict[Path, str]) -> None:
+            if not changes:
+                self.status(ui_text("status.nothing_changed"))
+                return
+
+            backup = make_backup({path: read_text(path) for path in changes})
+
+            try:
+                for path, text in changes.items():
+                    write_atomic(path, text)
+            except OSError as exc:
+                restore_last()
+                self.status(ui_text("status.write_failed", error=exc))
+                return
+
+            ok, detail = validate_niri()
+            log = self.query_one("#log", RichLog)
+
+            if not ok:
+                rollback = restore_last()
+                log.write(f"! {detail}")
+                log.write(f"↩ rolled back: {rollback}")
+                self.load_from_live()
+                self.refresh_app_table()
+                self.refresh_all()
+                self.status(ui_text("status.rolled_back", detail=detail))
+                return
+
+            reloaded = reload_niri()
+            log.write(f"✓ {detail}")
+            log.write("↻ niri reloaded" if reloaded else "! " + ui_text("status.reload_failed"))
+
+            for path in changes:
+                try:
+                    shown = "~/" + str(path.relative_to(HOME))
+                except ValueError:
+                    shown = str(path)
+                log.write(f"  live: {shown}")
+
+            log.write(f"  backup: {backup}")
+            self.load_from_live()
+            self.refresh_app_table()
+            self.refresh_all()
+            self.status(ui_text("status.applied", count=len(changes)))
+
+        def action_theme_settings(self) -> None:
+            """Exit this TUI, then launch the color settings TUI on the same terminal."""
+            target = _find_theme_settings_binary()
+            if not target:
+                self.status(ui_text("status.theme_missing"))
+                return
+
+            self.theme_settings_path = target
+            self.launch_theme_settings = True
+            self.exit()
+
+        def action_apply(self) -> None:
+            try:
+                self.apply_changes(self.build_changes())
+            except ValueError as exc:
+                self.status(ui_text("status.build_failed", error=exc))
+
+        def action_undo(self) -> None:
+            message = restore_last()
+            self.load_from_live()
+            self.refresh_app_table()
+            self.refresh_all()
+            self.status(message)
+
+        def action_quit(self) -> None:
+            self.exit()
+
+        def refresh_all(self) -> None:
+            for slider in self.query(Slider):
+                slider.redraw()
+            for toggle in self.query(Toggle):
+                toggle.redraw()
+            for action in self.query(Action):
+                action.redraw()
+            self.refresh_top()
+            self.refresh_keys()
+            self.update_status_line()
+
+        def refresh_top(self) -> None:
+            r = self.pal
+            t = Text()
+            t.append(f" {UI_TEXT["header"]["title"]} ", style=f"bold {r['bg']} on {r['accent']}")
+            t.append(f"  {UI_TEXT["header"]["source"]}", style=f"bold {r['fg_bright']}")
+            if self.dirty():
+                t.append(" " + UI_GLYPHS["live_marker"], style=r["warning"])
+            self.query_one("#top-left", Static).update(t)
+
+        def refresh_keys(self) -> None:
+            r = self.pal
+            t = Text()
+            for key, label in [
+                (UI_KEYS["apply"].lower(), UI_TEXT["footer"]["apply"]),
+                (UI_KEYS["undo"], UI_TEXT["footer"]["undo"]),
+                (f"{UI_KEYS["add"]}/{UI_KEYS["edit"]}/{UI_KEYS["delete"]}", UI_TEXT["footer"]["app_binds"]),
+                (f"{UI_KEYS["pointer"]}-{UI_KEYS["log"]}", UI_TEXT["footer"]["sections"]),
+                ("tab", UI_TEXT["footer"]["tab"]),
+                (UI_KEYS["quit"], UI_TEXT["footer"]["quit"]),
+            ]:
+                t.append(key, style=f"bold {r['accent']}")
+                t.append(f" {label}   ", style=r["fg_dim"])
+            self.query_one("#keys", Static).update(t)
+
+        def update_status_line(self) -> None:
+            try:
+                widget = self.query_one("#status", Static)
+            except Exception:
+                return
+            widget.update(self.status_text + ("  " + ui_text("status.unsaved") if self.dirty() else ""))
+
+        def status(self, msg: str) -> None:
+            self.status_text = msg
+            self.update_status_line()
+
+        def open_focus(self, selector: str) -> None:
+            try:
+                self.query_one(selector).focus()
+            except Exception:
+                pass
+
+        def action_section_pointer(self) -> None:
+            self.open_focus("#slider-mouse-speed")
+
+        def action_section_apps(self) -> None:
+            self.open_focus("#apps-table")
+
+        def action_section_niri(self) -> None:
+            self.open_focus("#slider-gaps")
+
+        def action_section_lock(self) -> None:
+            self.open_focus("#toggle-hyprlock-lid")
+
+        def action_section_log(self) -> None:
+            self.open_focus("#log")
+
+        def action_add_bind(self) -> None:
+            self.edit_binding(None)
+
+        def action_edit_bind(self) -> None:
+            self.edit_binding(self.query_one("#apps-table", AppTable).current_index())
+
+        def action_delete_bind(self) -> None:
+            self.delete_binding(self.query_one("#apps-table", AppTable).current_index())
+
+    app = QuickSettings()
+    app.run()
+
+    if app.launch_theme_settings:
+        target = getattr(app, "theme_settings_path", None) or _find_theme_settings_binary()
+        if target:
+            try:
+                os.execvp(target, [target])
+            except OSError as exc:
+                print(f"could not launch theme-settings: {exc}")
+                return 1
+
+    return 0
+
+
+def cli() -> int:
+    parser = argparse.ArgumentParser(prog="quick-settings")
+    parser.add_argument("--undo", action="store_true", help="undo the last quick-settings apply")
+    parser.add_argument(
+        "--reset-ui",
+        action="store_true",
+        help="replace the saved UI config with the defaults from this script",
+    )
+    args = parser.parse_args()
+
+    if args.reset_ui:
+        try:
+            if UI_CONFIG_FILE.exists():
+                UI_CONFIG_FILE.unlink()
+        except OSError as exc:
+            print(f"could not remove saved UI config: {exc}")
+            return 1
+        load_ui_config()
+        print(f"reset UI config → {UI_CONFIG_FILE}")
+        return 0
+
+    if args.undo:
+        print(restore_last())
+        return 0
+
+    return run_tui()
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())
