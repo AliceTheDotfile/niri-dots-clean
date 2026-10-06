@@ -24,6 +24,7 @@
     "local/bin/rice-colors-launch",
     "local/bin/theme-settings",
     "local/bin/theme-settings-launch",
+    "niri/config.kdl",
     "niri/parts/apps.kdl",
     "niri/parts/movement.kdl",
     "quickshell/my-shell/99a596372fcc8b84cc32d688d9d8b6e1.png",

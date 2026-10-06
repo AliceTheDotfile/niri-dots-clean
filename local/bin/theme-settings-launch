@@ -1,2 +1,5 @@
 #!/bin/sh
-exec /usr/bin/kitty --config @HOME@/.config/alice-rice/kitty.conf --hold '@HOME@/.local/bin/quick-settings'
+exec /usr/bin/kitty \
+    --config @HOME@/.config/alice-rice/kitty.conf \
+    --class quick-settings \
+    @HOME@/.local/bin/quick-settings

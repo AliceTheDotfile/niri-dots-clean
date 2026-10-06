@@ -1,2 +1,5 @@
 #!/bin/sh
-exec /usr/bin/kitty --config @HOME@/.config/alice-rice/kitty.conf --hold '@HOME@/.local/bin/theme-settings'
+exec /usr/bin/kitty \
+    --config @HOME@/.config/alice-rice/kitty.conf \
+    --class theme-settings \
+    @HOME@/.local/bin/theme-settings
