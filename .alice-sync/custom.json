@@ -28,6 +28,10 @@
     {
       "live": "~/.local/share/icons/hicolor/16x16/apps/theme-settings.png",
       "repo": "home/.local/share/icons/hicolor/16x16/apps/theme-settings.png"
+    },
+    {
+      "live": "~/.local/share/applications/theme-settings.desktop",
+      "repo": "home/.local/share/applications/theme-settings.desktop"
     }
   ]
 }
