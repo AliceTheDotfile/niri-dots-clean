@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Color Settings
-Exec=@HOME@/.local/bin/rice-colors-launch
-Terminal=false
-Categories=Settings;
-Icon=@HOME@/.local/share/icons/iconcolor.png
