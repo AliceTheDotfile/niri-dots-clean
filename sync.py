@@ -14,11 +14,23 @@ whole baseline, while existing systems only replace manifest-listed files.
 Waybar and Fastfetch are intentionally not managed here.
 
 Usage:
-    ./sync.py
-    ./sync.py --part quickshell
-    ./sync.py --part niri,quickshell --push
-    ./sync.py --dry-run
-    ./sync.py --manifest
+    ./sync.py                          review every rice part
+    ./sync.py --part quickshell        just one part (or: niri,quickshell,hyprlock)
+    ./sync.py --part niri --push       ...and push after committing
+    ./sync.py --dry-run                show what would be shared, write nothing
+    ./sync.py --yes                    approve everything without prompting
+
+Managing what gets shared:
+    ./sync.py --add ~/.config/foo/foo.conf   start syncing any file or folder in your home
+    ./sync.py --list-custom                  files you added this way
+    ./sync.py --remove-custom PATH           stop syncing one of them
+
+    ./sync.py --manifest                     show the update manifest
+    ./sync.py --manifest-edit                edit it by hand ($EDITOR), validated on save
+    ./sync.py --manifest-add PATH...         mark repo files (or live paths) as shared
+    ./sync.py --manifest-remove PATH...      un-share files (a folder path removes its files)
+    ./sync.py --manifest-clear               empty the manifest
+    ./sync.py --tools                        menu with all of the above
 """
 
 from __future__ import annotations
@@ -56,8 +68,8 @@ WHITE = "\033[97m"
 GRAY = "\033[90m"
 COLOR = sys.stdout.isatty()
 
-IGNORE_NAMES = {".qmlls.ini", "anonymous.katesession", "__pycache__", "sync.py", ".bashrc"}
-IGNORE_SUFFIXES = {".bak", ".pyc", ".log"}
+IGNORE_NAMES = {".qmlls.ini", "anonymous.katesession", "__pycache__", "sync.py", ".bashrc", ".sync.py.kate-swp"}
+IGNORE_SUFFIXES = {".bak", ".pyc", ".log", ".swp", ".kate-swp"}
 
 
 @dataclass(frozen=True)
@@ -97,6 +109,10 @@ GROUPS: dict[str, tuple[str, tuple[Mapping, ...]]] = {
             ".local/share/color-schemes/AliceNight.colors",
             ".local/share/themes/AliceNight", ".config/kate",
         )),
+    ),
+    "hyprlock": (
+        "Hyprlock",
+        (Mapping(CONFIG / "hypr" / "hyprlock.conf", ROOT / "home" / ".config" / "hypr" / "hyprlock.conf"),),
     ),
     "wallfliper": (
         "Wallfliper",
@@ -156,7 +172,14 @@ def input_terminal() -> Iterator[TextIO]:
         tty.close()
 
 
-def ask(prompt: str) -> str:
+ASSUME_YES = False
+
+
+def ask(prompt: str, default: str = "") -> str:
+    """Prompt for a line. With --yes nothing is asked: the default answer is used."""
+    if ASSUME_YES:
+        print(f"{prompt}{default or '(default)'}", flush=True)
+        return default
     with input_terminal() as stream:
         print(prompt, end="", flush=True)
         value = stream.readline()
@@ -391,6 +414,262 @@ def show_manifest() -> None:
 
 
 # ============================================================
+# Custom files (anything in your home you want shared)
+# ============================================================
+
+CUSTOM_FILE = ROOT / ".alice-sync" / "custom.json"
+
+
+def load_custom() -> list[dict[str, str]]:
+    try:
+        data = json.loads(CUSTOM_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    entries = []
+    for item in data.get("paths", []) if isinstance(data, dict) else []:
+        if isinstance(item, dict) and isinstance(item.get("live"), str) and isinstance(item.get("repo"), str):
+            entries.append({"live": item["live"], "repo": item["repo"]})
+    return entries
+
+
+def save_custom(entries: list[dict[str, str]]) -> None:
+    CUSTOM_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CUSTOM_FILE.write_text(json.dumps({"version": 1, "paths": entries}, indent=2) + "\n", encoding="utf-8")
+
+
+def register_custom_group() -> None:
+    """Expose the user's own files as the extra rice part `custom`."""
+    entries = load_custom()
+    if entries:
+        GROUPS["custom"] = ("Custom files", tuple(
+            Mapping(Path(e["live"]).expanduser(), ROOT / e["repo"]) for e in entries))
+    else:
+        GROUPS.pop("custom", None)
+
+
+def builtin_cover(live: Path) -> str | None:
+    """Which built-in rice part already syncs this path (if any)."""
+    for key, (_label, mappings) in GROUPS.items():
+        if key == "custom":
+            continue
+        for m in mappings:
+            if live == m.live or m.live in live.parents:
+                return key
+    return None
+
+
+def confirm(prompt: str, default_yes: bool = False) -> bool:
+    if ASSUME_YES:
+        return True
+    answer = ask(prompt + (" [Y/n] " if default_yes else " [y/N] ")).strip().lower()
+    return default_yes if not answer else answer in {"y", "yes"}
+
+
+def add_custom(arg: str, repo_path: str | None = None) -> bool:
+    live = Path(os.path.abspath(Path(arg).expanduser()))
+    if not exists(live):
+        raise RuntimeError(f"no such file or folder: {live}")
+    if ignored(live):
+        raise RuntimeError(f"{live.name} is on sync.py's ignore list")
+    covered = builtin_cover(live)
+    if covered and repo_path is None:
+        info(f"{live} is already part of the built-in '{covered}' part — run: ./sync.py --part {covered}")
+        return False
+    if repo_path is None:
+        try:
+            repo_path = "home/" + live.relative_to(HOME).as_posix()
+        except ValueError:
+            raise RuntimeError("only paths inside your home folder can be added automatically; "
+                               "pass --repo-path home/<where it should live> for others")
+    rp = Path(repo_path)
+    if rp.is_absolute() or ".." in rp.parts or rp.parts[:1] == (".git",) or not rp.parts:
+        raise RuntimeError(f"bad repository path: {repo_path}")
+    if rp.parts[0] != "home":
+        warn("repository paths outside home/ are only installed by the installer if it already knows that folder")
+    entries = [e for e in load_custom() if Path(e["live"]).expanduser() != live]
+    entries.append({"live": "~/" + live.relative_to(HOME).as_posix() if live.is_relative_to(HOME) else str(live),
+                    "repo": rp.as_posix()})
+    save_custom(entries)
+    register_custom_group()
+    ok(f"{live} will now be synced to {rp.as_posix()}")
+    return True
+
+
+def remove_custom(arg: str) -> bool:
+    live = Path(os.path.abspath(Path(arg).expanduser()))
+    entries = load_custom()
+    keep = [e for e in entries if Path(e["live"]).expanduser() != live]
+    if len(keep) == len(entries):
+        warn(f"{arg} isn't one of your custom files (see ./sync.py --list-custom)")
+        return False
+    save_custom(keep)
+    register_custom_group()
+    ok(f"no longer syncing {live}")
+    info("its copy in the repo and its manifest entry stay until you remove them "
+         "(./sync.py --manifest-remove PATH, then git rm)")
+    return True
+
+
+def list_custom() -> None:
+    entries = load_custom()
+    print()
+    if not entries:
+        info("no custom files yet — add one with: ./sync.py --add ~/.config/foo/foo.conf")
+        return
+    print(paint(PINK + BOLD, "custom files") + paint(DIM, "  (live → repo)"))
+    for e in entries:
+        print(f"    {e['live']}  {paint(GRAY, '→')}  {e['repo']}")
+
+
+# ============================================================
+# Manifest tools
+# ============================================================
+
+
+def to_repo_files(arg: str, must_exist_in_repo: bool = True) -> list[str]:
+    """Turn a repo-relative path, a live path, or a folder of either into repo file paths."""
+    raw = Path(arg).expanduser()
+    candidates: list[Path] = []
+    if not raw.is_absolute() and exists(ROOT / raw):
+        candidates.append(ROOT / raw)
+    live = Path(os.path.abspath(raw))
+    for _key, (_label, mappings) in GROUPS.items():
+        for m in mappings:
+            if live == m.live:
+                candidates.append(m.repo)
+            elif m.live in live.parents:
+                candidates.append(m.repo / live.relative_to(m.live))
+    if live.is_relative_to(HOME):
+        candidates.append(ROOT / "home" / live.relative_to(HOME))
+    found: list[str] = []
+    for c in candidates:
+        if exists(c):
+            if c.is_dir() and not c.is_symlink():
+                found += [repo_relative(f) for f in sorted(c.rglob("*"))
+                          if (f.is_file() or f.is_symlink()) and not ignored(f)]
+            elif not ignored(c):
+                found.append(repo_relative(c))
+            break
+    if not found and not must_exist_in_repo:
+        found.append(arg.strip("/"))
+    return list(dict.fromkeys(found))
+
+
+def manifest_add(args: list[str]) -> None:
+    data = load_manifest()
+    added = 0
+    for arg in args:
+        files = to_repo_files(arg)
+        if not files:
+            warn(f"{arg}: not in the repository yet — share it first with ./sync.py --add {arg}")
+            continue
+        for f in files:
+            data["managed"].add(f)
+            data["deleted"].discard(f)
+            added += 1
+    save_manifest(data)
+    ok(f"{added} file(s) marked as shared")
+
+
+def manifest_remove(args: list[str]) -> None:
+    data = load_manifest()
+    removed = 0
+    for arg in args:
+        wanted = set(to_repo_files(arg, must_exist_in_repo=False))
+        prefix = arg.strip("/") + "/"
+        wanted |= {x for x in data["managed"] if x.startswith(prefix)}
+        for f in wanted & data["managed"]:
+            data["managed"].discard(f)
+            data["deleted"].discard(f)
+            removed += 1
+    save_manifest(data)
+    ok(f"{removed} file(s) un-shared") if removed else warn("nothing matched")
+
+
+def manifest_clear() -> None:
+    data = load_manifest()
+    if not data["managed"]:
+        info("the manifest is already empty")
+        return
+    if not confirm(f"remove all {len(data['managed'])} entries? existing systems get no updates until you re-add files"):
+        info("left as it was")
+        return
+    save_manifest({"managed": set(), "deleted": set()})
+    ok("manifest cleared — commit it when you're ready (git add .alice-sync && git commit)")
+
+
+def manifest_edit() -> None:
+    save_manifest(load_manifest())   # make sure it exists, sorted and tidy
+    original = MANIFEST.read_text(encoding="utf-8")
+    editor = (os.environ.get("VISUAL") or os.environ.get("EDITOR")
+              or next((e for e in ("nano", "vim", "vi") if shutil.which(e)), ""))
+    if not editor:
+        raise RuntimeError("no editor found — set $EDITOR (or edit .alice-sync/update-manifest.json yourself)")
+    while True:
+        subprocess.run([*shlex.split(editor), str(MANIFEST)], check=False)
+        try:
+            data = load_manifest()
+            break
+        except Exception as exc:   # noqa: BLE001
+            fail(f"that isn't a valid manifest: {exc}")
+            # without a person at the keyboard (--yes) there is nobody to fix it: put it back
+            if ASSUME_YES or not confirm("open it again to fix it?", default_yes=True):
+                MANIFEST.write_text(original, encoding="utf-8")
+                warn("restored the previous manifest")
+                return
+    save_manifest(data)   # normalise: sorted, deleted ⊆ managed
+    ok(f"manifest saved ({len(data['managed'])} entries)")
+    missing = sorted(x for x in data["managed"] - data["deleted"] if not exists(ROOT / x))
+    for path in missing:
+        warn(f"{path} is listed but isn't in the repo — the installer would complain")
+
+
+def tools_menu() -> None:
+    while True:
+        clear()
+        print()
+        print(paint(PINK + BOLD, "alice's rice sync") + " " + paint(DIM, "· tools"))
+        print()
+        items = [
+            ("1", "review and sync changes"), ("2", "add a file or folder to sync"),
+            ("3", "list my custom files"), ("4", "stop syncing a custom file"),
+            ("5", "show the update manifest"), ("6", "edit the manifest by hand"),
+            ("7", "clear the manifest"), ("q", "quit"),
+        ]
+        for key, label in items:
+            print(f"  {paint(PINK, key.rjust(2))}  {label}")
+        print()
+        choice = ask("choice: ").strip().lower()
+        try:
+            if choice in {"q", "quit", ""}:
+                return
+            if choice == "1":
+                groups = choose_groups()
+                if groups:
+                    run_sync(groups, dry=False, do_push=False)
+            elif choice == "2":
+                path = ask("path to add (file or folder in your home): ").strip()
+                if path and add_custom(path) and confirm("sync it now?", default_yes=True):
+                    run_sync(["custom"], dry=False, do_push=False)
+            elif choice == "3":
+                list_custom()
+            elif choice == "4":
+                list_custom()
+                path = ask("path to stop syncing: ").strip()
+                if path:
+                    remove_custom(path)
+            elif choice == "5":
+                show_manifest()
+            elif choice == "6":
+                manifest_edit()
+            elif choice == "7":
+                manifest_clear()
+        except RuntimeError as exc:
+            fail(str(exc))
+        ask("press enter to continue… ")
+
+
+# ============================================================
 # Candidate scanning
 # ============================================================
 
@@ -568,7 +847,7 @@ def approve_changes(candidates: list[Candidate]) -> list[Candidate]:
     print()
     warn("approved files become part of the shared rice and can update other computers")
 
-    answer = ask("approve ALL of these changes? [Y/n] ").strip().lower()
+    answer = ask("approve ALL of these changes? [Y/n] ", "y").strip().lower()
 
     if answer in {"", "y", "yes", "a", "all"}:
         return candidates
@@ -604,7 +883,7 @@ def review_diffs(selected: list[Candidate]) -> list[Candidate]:
         show_diff(candidate)
 
     print()
-    answer = ask("send these approved changes to the repository? [Y/n] ").strip().lower()
+    answer = ask("send these approved changes to the repository? [Y/n] ", "y").strip().lower()
     if answer in {"", "y", "yes"}:
         return selected
 
@@ -660,6 +939,8 @@ def commit_selected(selected: list[Candidate], groups: list[str], dry: bool) -> 
     record_selected(selected)
     paths = sorted({x.path for x in selected})
     paths.append(repo_relative(MANIFEST))
+    if exists(CUSTOM_FILE):   # the registry travels with the files so fresh installs know about them
+        paths.append(repo_relative(CUSTOM_FILE))
 
     git("add", "-A", "--", *paths)
     staged = {
@@ -759,11 +1040,15 @@ def choose_groups() -> list[str]:
     for index, name in enumerate(names, 1):
         print(f"  {paint(PINK, str(index).rjust(2))}  {GROUPS[name][0]}  {paint(GRAY, '(' + name + ')')}")
     print(f"  {paint(PINK, ' m')}  multiple")
+    print(f"  {paint(PINK, ' t')}  tools (manifest, add files)")
     print(f"  {paint(PINK, ' q')}  quit")
     print()
 
     answer = ask("choice: ").strip().lower()
     if answer in {"q", "quit", "exit"}:
+        return []
+    if answer in {"t", "tools"}:
+        tools_menu()
         return []
     if answer in {"m", "multiple"}:
         answer = ask("parts (example: quickshell,niri): ").strip().lower()
@@ -784,54 +1069,7 @@ def usage() -> None:
         print(f"  {key:<12} {label}")
 
 
-def main(argv: list[str]) -> int:
-    if os.geteuid() == 0:
-        raise RuntimeError("do not run sync.py as root")
-    if shutil.which("git") is None:
-        raise RuntimeError("git is required")
-    if not (ROOT / ".git").is_dir():
-        raise RuntimeError("sync.py must be inside the dotfiles git repository")
-
-    if argv == ["--help"] or argv == ["-h"]:
-        usage()
-        return 0
-    if argv == ["--manifest"]:
-        show_manifest()
-        return 0
-
-    dry = "--dry-run" in argv
-    do_push = "--push" in argv
-    part: str | None = None
-    index = 0
-    while index < len(argv):
-        arg = argv[index]
-        if arg in {"--dry-run", "--push"}:
-            index += 1
-            continue
-        if arg == "--part":
-            if index + 1 >= len(argv):
-                raise RuntimeError("--part needs a value")
-            part = argv[index + 1]
-            index += 2
-            continue
-        if arg.startswith("--part="):
-            part = arg.split("=", 1)[1]
-            index += 1
-            continue
-        raise RuntimeError(f"unknown option: {arg}")
-
-    groups = (
-        [x.strip().lower() for x in part.split(",") if x.strip()]
-        if part
-        else list(GROUPS)
-    )
-    unknown = [x for x in groups if x not in GROUPS]
-    if unknown:
-        raise RuntimeError("unknown rice part: " + ", ".join(unknown))
-    if not groups:
-        info("bye :3")
-        return 0
-
+def run_sync(groups: list[str], dry: bool, do_push: bool) -> int:
     global TRACKED
     TRACKED = tracked_files()
     conflicts = unmerged()
@@ -849,7 +1087,7 @@ def main(argv: list[str]) -> int:
     # Optional diff review happens after the user has chosen which files
     # should be shared. This keeps the initial screen concise while still
     # making the exact live-vs-repo content easy to inspect.
-    review = ask("review the exact diffs before saving? [y/N] ").strip().lower()
+    review = ask("review the exact diffs before saving? [y/N] ", "n").strip().lower()
     if review in {"y", "yes", "d", "diff"}:
         selected = review_diffs(selected)
         if not selected:
@@ -866,6 +1104,108 @@ def main(argv: list[str]) -> int:
     print()
     ok("rice sync finished :3")
     return 0
+
+
+VALUE_OPTS = {"--part", "--repo-path"}
+LIST_OPTS = {"--add", "--remove-custom", "--manifest-add", "--manifest-remove"}
+FLAG_OPTS = {"--dry-run", "--push", "--yes", "-y", "--manifest", "--manifest-edit", "--manifest-clear",
+             "--list-custom", "--tools"}
+
+
+def parse_args(argv: list[str]) -> tuple[set[str], dict[str, str], dict[str, list[str]]]:
+    flags: set[str] = set()
+    values: dict[str, str] = {}
+    lists: dict[str, list[str]] = {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        name, eq, inline = arg.partition("=")
+        if name in VALUE_OPTS:
+            if eq:
+                values[name] = inline
+            elif i + 1 < len(argv):
+                values[name] = argv[i + 1]
+                i += 1
+            else:
+                raise RuntimeError(f"{name} needs a value")
+        elif arg in LIST_OPTS:
+            items: list[str] = []
+            while i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                items.append(argv[i + 1])
+                i += 1
+            if not items:
+                raise RuntimeError(f"{arg} needs at least one path")
+            lists[arg] = items
+        elif arg in FLAG_OPTS:
+            flags.add("--yes" if arg == "-y" else arg)
+        else:
+            raise RuntimeError(f"unknown option: {arg}")
+        i += 1
+    return flags, values, lists
+
+
+def main(argv: list[str]) -> int:
+    global ASSUME_YES
+    if os.geteuid() == 0:
+        raise RuntimeError("do not run sync.py as root")
+    if shutil.which("git") is None:
+        raise RuntimeError("git is required")
+    if not (ROOT / ".git").is_dir():
+        raise RuntimeError("sync.py must be inside the dotfiles git repository")
+
+    if argv == ["--help"] or argv == ["-h"]:
+        usage()
+        return 0
+
+    flags, values, lists = parse_args(argv)
+    ASSUME_YES = "--yes" in flags
+    register_custom_group()
+
+    # ---- tools that don't sync anything ----
+    if "--manifest" in flags:
+        show_manifest()
+        return 0
+    if "--list-custom" in flags:
+        list_custom()
+        return 0
+    if "--manifest-edit" in flags:
+        manifest_edit()
+        return 0
+    if "--manifest-clear" in flags:
+        manifest_clear()
+        return 0
+    if "--manifest-add" in lists:
+        manifest_add(lists["--manifest-add"])
+        return 0
+    if "--manifest-remove" in lists:
+        manifest_remove(lists["--manifest-remove"])
+        return 0
+    if "--remove-custom" in lists:
+        for path in lists["--remove-custom"]:
+            remove_custom(path)
+        return 0
+    if "--tools" in flags:
+        tools_menu()
+        return 0
+    if "--add" in lists:
+        added = [p for p in lists["--add"] if add_custom(p, values.get("--repo-path"))]
+        if added and confirm("sync it now?", default_yes=True):
+            return run_sync(["custom"], "--dry-run" in flags, "--push" in flags)
+        if added:
+            info("run ./sync.py --part custom whenever you want to review and share it")
+        return 0
+
+    # ---- the normal sync flow ----
+    part = values.get("--part")
+    groups = [x.strip().lower() for x in part.split(",") if x.strip()] if part else list(GROUPS)
+    unknown = [x for x in groups if x not in GROUPS]
+    if unknown:
+        raise RuntimeError("unknown rice part: " + ", ".join(unknown)
+                           + ("  (add files first: ./sync.py --add PATH)" if "custom" in unknown else ""))
+    if not groups:
+        info("bye :3")
+        return 0
+    return run_sync(groups, "--dry-run" in flags, "--push" in flags)
 
 
 if __name__ == "__main__":
