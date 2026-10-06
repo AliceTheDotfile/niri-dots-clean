@@ -16,6 +16,7 @@
     "home/.local/share/applications/quick-settings.desktop",
     "home/.local/share/applications/rice-colors.desktop",
     "home/.local/share/icons/hicolor/16x16/apps/quick-settings.png",
+    "home/.local/share/icons/hicolor/16x16/apps/theme-settings.png",
     "home/.local/share/icons/iconcolor.png",
     "local/bin/rice-colors",
     "local/bin/rice-colors-launch",

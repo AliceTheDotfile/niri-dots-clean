@@ -24,6 +24,10 @@
     {
       "live": "~/.local/share/icons/hicolor/16x16/apps/quick-settings.png",
       "repo": "home/.local/share/icons/hicolor/16x16/apps/quick-settings.png"
+    },
+    {
+      "live": "~/.local/share/icons/hicolor/16x16/apps/theme-settings.png",
+      "repo": "home/.local/share/icons/hicolor/16x16/apps/theme-settings.png"
     }
   ]
 }
