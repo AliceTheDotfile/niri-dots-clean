@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Quick Settings
+Exec=@HOME@/.local/bin/theme-settings-launch
+Terminal=false
+Categories=Settings;
+Icon=@HOME@/.local/share/icons/iconquick.png

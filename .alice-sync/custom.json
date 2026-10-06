@@ -16,6 +16,10 @@
     {
       "live": "~/.local/share/icons/iconcolor.png",
       "repo": "home/.local/share/icons/iconcolor.png"
+    },
+    {
+      "live": "~/.local/share/applications/quick-settings.desktop",
+      "repo": "home/.local/share/applications/quick-settings.desktop"
     }
   ]
 }
