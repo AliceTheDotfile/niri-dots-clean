@@ -2079,7 +2079,7 @@ def hue_summary(p: Palette) -> tuple[str, str]:
         issues = audit_palette(p)
         if issues:
             return f"{len(p.hues)} hues · ! {issues[0]}", "warn"
-        return f"{len(p.hues)} observed hues · rice stays on them ✓", "ok"
+        return f"{len(p.hues)} observed hues", "ok"
     return "default theme", "dim"
 
 
@@ -2521,7 +2521,7 @@ def run_tui(args) -> int:
             self.sync_master()
             self.refresh_all()
             self.set_interval(1.5, self.check_external)
-            self.status("g builds a palette from your wallpaper · A applies it · 1–7 open the sections below")
+            self.status("")
             self.query_one("#log", RichLog).write("nothing applied this session yet")
             self.query_one("#wp-gen", Act).focus()
 
