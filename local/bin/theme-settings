@@ -17,6 +17,8 @@ Usage:
     theme-settings --image FILE --apply  palette from a specific image
     theme-settings --preset NAME --apply apply a saved preset ("AliceNight" = default)
     theme-settings --restore             undo the last apply
+    theme-settings --list-opacity        show every transparency setting
+    theme-settings --opacity kitty=0.85,bar=0.9   (or all=0.9) change transparency only
     theme-settings --list-targets | --save-default | --show-default
 
 (`rice-colors` still works — it is a thin wrapper around this.)
@@ -173,7 +175,26 @@ def snap_to_hues(hx: str, hues: list[float], neutral: bool = False) -> str:
     best = min(hues, key=lambda o: hue_dist(h, o))
     if hue_dist(h, best) <= HUE_TOL:
         return hx
-    return hsl2h(best, s, l)
+    return _hit_hue(best, s, l)
+
+
+def _hit_hue(target: float, s: float, l: float) -> str:
+    """hsl2h(target, s, l), corrected for 8-bit rounding: a very pale or very dark color can land
+    ~10° from the hue it was built with, so look at the neighbouring values and keep the one
+    whose *rounded* result is closest to `target`."""
+    best = hsl2h(target, s, l)
+    err = hue_dist(h2hsl(best)[0], target)
+    if err <= 1.5:
+        return best
+    for ds in (0.0, 0.01, -0.01, 0.02, -0.02, 0.03, -0.03):
+        for dh in range(-9, 10):
+            cand = hsl2h(target + dh, _clamp(s + ds, 0.0, 1.0), l)
+            e = hue_dist(h2hsl(cand)[0], target)
+            if e < err - 1e-9:
+                best, err = cand, e
+        if err <= 1.5:
+            break
+    return best
 
 
 # ───────────────────────────── palette model ─────────────────────────────
@@ -1060,6 +1081,21 @@ def _rgbs(h: str) -> str:
 
 
 def _kde_generated_sections(p: Palette) -> dict[str, dict[str, str]]:
+    """Built-in KDE colors (used when the default theme snapshot has none). They are built by
+    mixing roles, and a mix of two hues lands between them — so each one is pulled back onto
+    the wallpaper's hues."""
+    secs = _kde_generated_raw(p)
+    if p.hues or p.neutral:
+        for kv in secs.values():
+            for k, v in kv.items():
+                mo = re.fullmatch(r"(\d{1,3}),(\d{1,3}),(\d{1,3})", v)
+                if mo and v != "128,128,128":
+                    n = h2rgb(snap_to_hues(rgb2h(tuple(int(x) for x in mo.groups())), p.hues, p.neutral))
+                    kv[k] = f"{n[0]},{n[1]},{n[2]}"
+    return secs
+
+
+def _kde_generated_raw(p: Palette) -> dict[str, dict[str, str]]:
     r = p.roles
 
     def block(bg, alt, fg=None, active=None):
@@ -1161,7 +1197,10 @@ def qt6ct_text(p: Palette) -> str:
     base = default_palette()
     if base.extras.get("qt6ct"):
         return warp_qt6ct(base.extras["qt6ct"], Warp(base, p))
-    return _qt6ct_generated(p)
+    text = _qt6ct_generated(p)
+    if p.hues or p.neutral:   # mixes of roles, held to the wallpaper's hues
+        text = warp_qt6ct(text, lambda hx: snap_to_hues(hx, p.hues, p.neutral))
+    return text
 
 
 def btop_theme_text(p: Palette) -> str:
@@ -1203,7 +1242,7 @@ def cava_kv(p: Palette) -> dict[str, str]:
     for i in range(8):
         t = i / 7 * (len(stops) - 1)
         lo = min(int(t), len(stops) - 2)
-        cols.append(mix(stops[lo], stops[lo + 1], t - lo))
+        cols.append(snap_to_hues(mix(stops[lo], stops[lo + 1], t - lo), p.hues, p.neutral))
     kv = {"gradient": "1"}
     kv.update({f"gradient_color_{i + 1}": f"'{c.lower()}'" for i, c in enumerate(cols)})
     return kv
@@ -1368,6 +1407,89 @@ def find_repo(hint: str | None = None) -> Path | None:
     return None
 
 
+# ───────────────────────────── transparency ─────────────────────────────
+# Opacity lives in the files of the apps themselves (kitty's background_opacity,
+# quickshell's panelOpacity, an rgba() alpha in a stylesheet...). Each surface says where
+# its number is; Theme Settings can read it, stage a new one, and write it back through
+# the same backup / undo / reload path as the colors.
+
+NUM = r"([0-9]*\.?[0-9]+)"
+
+
+@dataclass
+class Surface:
+    key: str
+    label: str
+    live: str            # path relative to $HOME
+    repo: str            # path inside the dotfiles repo
+    pattern: str         # group 1 = text before the number, group 2 = the number, group 3 = text after
+    lo: float = 0.30     # lowest value the UI allows (so nothing becomes invisible by accident)
+    hi: float = 1.0
+    hook: str = ""       # which app to nudge so it picks the change up
+
+
+SURFACES: list[Surface] = [
+    Surface("kitty", "kitty terminal", ".config/alice-rice/kitty.conf", "alice-rice/kitty.conf",
+            r"(?m)^([ \t]*background_opacity[ \t]+)" + NUM + r"()", 0.20, 1.0, "kitty"),
+    Surface("bar", "quickshell bar", ".config/quickshell/my-shell/TopBar.qml", "quickshell/my-shell/TopBar.qml",
+            r"(readonly property real panelOpacity:[ \t]*)" + NUM + r"()"),
+    Surface("launcher", "quickshell launcher", ".config/quickshell/my-shell/Launcher.qml",
+            "quickshell/my-shell/Launcher.qml", r"(readonly property real panelOpacity:[ \t]*)" + NUM + r"()"),
+    Surface("notif", "notifications", ".config/swaync/style.css", "swaync/style.css",
+            r"(@define-color[ \t]+bg_transparent[ \t]+rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*)" + NUM + r"(\s*\))",
+            0.30, 1.0, "swaync"),
+    Surface("waybar", "waybar", ".config/waybar/niri-left.css", "waybar/niri-left.css",
+            r"(?m)^([ \t]*background:[ \t]*rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*)" + NUM + r"(\s*\))",
+            0.30, 1.0, "waybar"),
+    Surface("lock", "lock screen input", ".config/hypr/hyprlock.conf", "home/.config/hypr/hyprlock.conf",
+            r"(?m)^([ \t]*inner_color[ \t]*=[ \t]*rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*)" + NUM + r"(\s*\))",
+            0.0, 1.0),
+]
+SURFACE_BY_KEY = {x.key: x for x in SURFACES}
+
+
+def read_opacity(surface: Surface, root: Path | None = None) -> float | None:
+    """Current opacity of a surface, or None when its file or setting isn't there."""
+    path = live_path(surface.live) if root is None else root / surface.repo
+    try:
+        mo = re.search(surface.pattern, path.read_text(errors="replace"))
+    except OSError:
+        return None
+    return float(mo.group(2)) if mo else None
+
+
+def set_opacity_text(text: str, surface: Surface, value: float) -> tuple[str, bool]:
+    """(new text, found) — only the first match is touched, nothing else in the file."""
+    value = _clamp(value, surface.lo, surface.hi)
+    done = [False]
+
+    def sub(mo):
+        done[0] = True
+        return f"{mo.group(1)}{value:.2f}{mo.group(3) or ''}"
+
+    return re.sub(surface.pattern, sub, text, count=1), done[0]
+
+
+def parse_opacity_spec(spec: str) -> dict[str, float]:
+    """'kitty=0.85,bar=0.9' or 'all=0.9' (percent works too: 'kitty=85')."""
+    out: dict[str, float] = {}
+    for part in filter(None, (x.strip() for x in spec.split(","))):
+        key, _, raw = part.partition("=")
+        key = key.strip().lower()
+        try:
+            v = float(raw)
+        except ValueError:
+            raise SystemExit(f"bad opacity '{part}' — use name=0.85 (names: all, " + ", ".join(SURFACE_BY_KEY) + ")")
+        v = v / 100.0 if v > 1.0 else v
+        if key == "all":
+            out.update({sk: v for sk in SURFACE_BY_KEY})
+        elif key in SURFACE_BY_KEY:
+            out[key] = v
+        else:
+            raise SystemExit(f"unknown surface '{key}' (names: all, " + ", ".join(SURFACE_BY_KEY) + ")")
+    return out
+
+
 # ───────────────────────────── state / backup / tracking ─────────────────────────────
 
 
@@ -1387,7 +1509,12 @@ def save_state(st: dict) -> None:
 
 def palette_signature(p: Palette) -> dict:
     """The palette actually used to render a particular file."""
-    return {"name": p.name, "roles": dict(p.roles), "ansi": list(p.ansi)}
+    d: dict = {"name": p.name, "roles": dict(p.roles), "ansi": list(p.ansi)}
+    if p.hues:       # the hues matter: shades derived from this palette were held to them
+        d["hues"] = [round(float(h), 1) for h in p.hues]
+    if p.neutral:
+        d["neutral"] = True
+    return d
 
 
 def text_hash(text: str) -> str:
@@ -1408,7 +1535,9 @@ def palette_from_signature(d: dict) -> Palette | None:
             return None
         return finalize(Palette.from_dict({"name": payload.get("name", "tracked"),
                                            "roles": payload.get("roles", {}),
-                                           "ansi": payload.get("ansi", [])}), rederive=False)
+                                           "ansi": payload.get("ansi", []),
+                                           "hues": payload.get("hues", []),
+                                           "neutral": payload.get("neutral", False)}), rederive=False)
     except Exception:
         return None
 
@@ -1472,22 +1601,41 @@ def render_file(spec: FileSpec, text: str | None, pal: Palette, st_pals: list[Pa
         return ini_set(text, "color", cava_kv(pal)), "gradient set", pal
 
     def remap(src: Palette, label: str):
-        extra = None
-        if spec.warp:
-            # the default theme's in-between shades (kitty's dimmed tab colors...) are
-            # tracked individually: wherever they currently sit (src's version of them),
-            # they go to exactly where `pal` wants them — so palettes chain and come
-            # back to the default without drift
-            base = default_palette()
-            w_src, w_new = Warp(base, src), Warp(base, pal)
-            extra = {h2rgb(w_src(c0)): h2rgb(w_new(c0)) for c0 in base.extras.get("shades", "").split()}
+        extra: dict | None = None
         held: dict[int, str] = {}
+        shades: dict[int, tuple[str, str]] = {}
         body = text
         if spec.warp:
-            body, held = protect_ansi(text, src)
+            # The default theme's in-between shades (kitty's dimmed tab colors...) are tracked one
+            # by one. A shade is found by the setting it belongs to (`active_tab_background`), not
+            # by its color — in a wallpaper palette it can coincide with a real role, and a plain
+            # color match would then drag it along with that role and drift.
+            base = default_palette()
+            w_src, w_new = Warp(base, src), Warp(base, pal)
+            extra = {}
+            for i, tok in enumerate(base.extras.get("shades", "").split()):
+                key, _, raw = tok.rpartition("=")
+                hx = norm_hex(raw)
+                if not hx:
+                    continue
+                if key:
+                    def hold(mo, i=i, hx=hx):
+                        if norm_hex(mo.group(2)) == norm_hex(w_src(hx)):
+                            shades[i] = (mo.group(2), w_new(hx))
+                            return f"{mo.group(1)}@@SHADE{i}@@"
+                        return mo.group(0)
+
+                    body = re.sub(rf"(?m)^([ \t]*{re.escape(key)}[ \t]+)(#[0-9a-fA-F]{{6}})\b", hold, body)
+                else:   # no setting name known: fall back to matching the color
+                    extra[h2rgb(w_src(hx))] = h2rgb(w_new(hx))
+            body, held = protect_ansi(body, src)
         new, n = remap_text(body, build_map(src, pal), Warp(src, pal) if spec.warp else None, extra)
         new = release_ansi(new, held, pal)
-        return new, f"{n + sum(1 for i, o in held.items() if norm_hex(o) != pal.ansi[i])} colors ({label})", src
+        for i, (orig, newhx) in shades.items():
+            new = new.replace(f"@@SHADE{i}@@", newhx.lower() if orig == orig.lower() else newhx.upper())
+        n += sum(1 for i, o in held.items() if norm_hex(o) != pal.ansi[i]) + sum(
+            1 for o, nh in shades.values() if norm_hex(o) != norm_hex(nh))
+        return new, f"{n} colors ({label})", src
 
     # a content hash is stronger than color scoring: untouched since our last write →
     # the recorded source palette is authoritative even with only one or two role colors
@@ -1554,7 +1702,7 @@ def run_hooks(keys: set[str], log) -> None:
 
 
 def apply_palette(pal: Palette, target_keys: list[str], repo: Path | None = None, dry_run: bool = False,
-                  reload: bool = True, log=print) -> list[Result]:
+                  reload: bool = True, log=print, opacity: dict[str, float] | None = None) -> list[Result]:
     pal = finalize(pal.copy(), rederive=False)
     st = load_state()
     st_pals = known_palettes(st)
@@ -1568,11 +1716,17 @@ def apply_palette(pal: Palette, target_keys: list[str], repo: Path | None = None
         roots.append(("repo", repo))
     stamp = time.strftime("%Y%m%d-%H%M%S")
     bdir = BACKUPS / stamp
+    n_same = 1
+    while bdir.exists():   # two applies in the same second must not share (and overwrite) one backup
+        n_same += 1
+        bdir = BACKUPS / f"{stamp}-{n_same}"
     manifest = {"files": [], "prev_applied": st.get("applied"), "prev_file_palettes": prev_file_palettes}
     results: list[Result] = []
     seen: set[Path] = set()
     touched: set[str] = set()
     tracking_changed = False
+    backed: set[Path] = set()      # files already saved to this apply's backup
+    extra_hooks: set[str] = set()  # apps to nudge because of opacity changes
 
     if "auto" in target_keys:
         covered = {live_path(sp.live).resolve() for t in TARGETS for sp in t.files}
@@ -1633,6 +1787,7 @@ def apply_palette(pal: Palette, target_keys: list[str], repo: Path | None = None
                         manifest["files"].append({"path": str(real), "backup": str(bpath)})
                     else:
                         manifest["files"].append({"path": str(real), "backup": None})
+                    backed.add(real)
                     atomic_write(path, new)
                     try:   # verify, and record the exact resulting content for future remaps
                         written = path.read_text(errors="replace")
@@ -1647,6 +1802,48 @@ def apply_palette(pal: Palette, target_keys: list[str], repo: Path | None = None
                     touched.add(key)
                 seen.add(real)
                 results.append(Result(key, shown, "ok", note))
+
+    # transparency: independent of which color targets are selected; runs after the colors so
+    # the tracking hash it records is the file's final content
+    for skey, value in (opacity or {}).items():
+        surf = SURFACE_BY_KEY.get(skey)
+        if surf is None:
+            results.append(Result("opacity", skey, "error", "unknown surface"))
+            continue
+        for _root_name, root in roots:
+            path = live_path(surf.live) if root is None else root / surf.repo
+            shown = ("~/" + str(path.relative_to(HOME))) if path.is_relative_to(HOME) else str(path)
+            if root is not None:
+                shown = f"[repo] {surf.repo}"
+            if not path.is_file():
+                results.append(Result("opacity", shown, "missing"))
+                continue
+            real = path.resolve()
+            text = path.read_text(errors="replace")
+            new, found = set_opacity_text(text, surf, value)
+            if not found:
+                results.append(Result("opacity", shown, "error", "no opacity setting found in this file"))
+                continue
+            label = f"{surf.label} {round(_clamp(value, surf.lo, surf.hi) * 100)}%"
+            if new == text:
+                results.append(Result("opacity", shown, "unchanged", label))
+                continue
+            if not dry_run:
+                if real not in backed:
+                    bpath = bdir / str(real).lstrip("/")
+                    bpath.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(real, bpath)
+                    manifest["files"].append({"path": str(real), "backup": str(bpath)})
+                    backed.add(real)
+                atomic_write(path, new)
+                rec = file_palettes.get(str(real))
+                if isinstance(rec, dict):   # keep exact-content tracking valid for later palette changes
+                    rec["sha256"] = text_hash(path.read_text(errors="replace"))
+                    tracking_changed = True
+                touched.add("opacity")
+                if surf.hook:
+                    extra_hooks.add(surf.hook)
+            results.append(Result("opacity", shown, "ok", label))
 
     if not dry_run:
         st["file_palettes"] = file_palettes
@@ -1673,7 +1870,7 @@ def apply_palette(pal: Palette, target_keys: list[str], repo: Path | None = None
             for d in dirs[:-15]:
                 shutil.rmtree(d, ignore_errors=True)
             if reload:
-                run_hooks({h for k in touched for h in TARGET_BY_KEY[k].hooks}, log)
+                run_hooks({h for k in touched if k in TARGET_BY_KEY for h in TARGET_BY_KEY[k].hooks} | extra_hooks, log)
         if touched or tracking_changed:
             save_state(st)
     return results
@@ -1757,10 +1954,12 @@ def save_default(repo: Path) -> tuple[Path, list[str]]:
         for spec in t.files:
             f = repo / spec.repo
             if spec.warp and f.is_file():
-                for mo in HEX_RE.finditer(f.read_text(errors="ignore")):
-                    hx = "#" + mo.group(1).upper()
-                    if h2rgb(hx) not in known and h2hsl(hx)[1] >= 0.04 and hx not in shades:
-                        shades.append(hx)
+                text_ = f.read_text(errors="ignore")
+                for mo in re.finditer(r"(?m)^[ \t]*([A-Za-z_]\w*)[ \t]+(#[0-9a-fA-F]{6})\b", text_):
+                    hx = "#" + mo.group(2)[1:].upper()
+                    tok = f"{mo.group(1)}={hx}"
+                    if h2rgb(hx) not in known and h2hsl(hx)[1] >= 0.04 and tok not in shades:
+                        shades.append(tok)
     if shades:
         p.extras["shades"] = " ".join(shades)
     qt = repo / "qt6ct" / "colors" / "AliceNight.conf"
@@ -1830,7 +2029,22 @@ def main_cli(args) -> int:
         for n in notes:
             print(f"  note: {n}")
         return 0
+    if args.list_opacity:
+        for sf in SURFACES:
+            v = read_opacity(sf)
+            print(f"{sf.key:9} {f'{round(v * 100)}%' if v is not None else 'not found':>9}   {sf.label}")
+        return 0
+    opacity = parse_opacity_spec(args.opacity) if args.opacity else None
     pal = cli_palette(args)
+    if pal is None and opacity:   # transparency only: the colors stay exactly as they are
+        st = load_state()
+        base = Palette.from_dict(st["applied"]) if st.get("applied") else default_palette()
+        repo = find_repo(args.repo) if (args.repo or args.with_repo) else None
+        for r in apply_palette(base, [], repo, args.dry_run, not args.no_reload, opacity=opacity):
+            print(f"  {r.status:9} {r.target:10} {r.path}  {r.detail}")
+        if args.dry_run:
+            print("(dry run — nothing written)")
+        return 0
     if pal is None:
         return 1
     for k, lbl, _ in BASE_ROLES + DERIVED_ROLES:
@@ -1847,7 +2061,7 @@ def main_cli(args) -> int:
         repo = find_repo(args.repo) if (args.repo or args.with_repo) else None
         if (args.repo or args.with_repo) and not repo:
             print("warning: dotfiles repo not found; only updating live files")
-        for r in apply_palette(pal, keys, repo, args.dry_run, not args.no_reload):
+        for r in apply_palette(pal, keys, repo, args.dry_run, not args.no_reload, opacity=opacity):
             print(f"  {r.status:9} {r.target:10} {r.path}  {r.detail}")
         if args.dry_run:
             print("(dry run — nothing written)")
@@ -1869,16 +2083,21 @@ def hue_summary(p: Palette) -> tuple[str, str]:
     return "default theme", "dim"
 
 
+def swatches(hexes: list[str]) -> str:
+    """Markup for a strip of color blocks, used in section headers."""
+    return "".join(f"[{h}]██[/]" for h in hexes)
+
+
 def run_tui(args) -> int:
     try:
         from rich.text import Text
         from textual import on, work
         from textual.app import App, ComposeResult
         from textual.binding import Binding
-        from textual.containers import Horizontal, Vertical
+        from textual.containers import Horizontal, Vertical, VerticalScroll
         from textual.message import Message
         from textual.theme import Theme
-        from textual.widgets import DataTable, Input, RichLog, Static
+        from textual.widgets import Collapsible, DataTable, Input, RichLog, Static
     except ImportError:
         print("missing textual. install it with: sudo pacman -S python-textual python-pillow")
         return 1
@@ -1941,63 +2160,223 @@ def run_tui(args) -> int:
 
     class RoleTable(DataTable):
         BINDINGS = [
-            Binding("j", "cursor_down", "down", show=False), Binding("k", "cursor_up", "up", show=False),
-            Binding("h", "nudge('h',-6)", "hue−", show=False), Binding("H", "nudge('h',6)", "hue+", show=False),
-            Binding("s", "nudge('s',-0.04)", "sat−", show=False), Binding("S", "nudge('s',0.04)", "sat+", show=False),
-            Binding("l", "nudge('l',-0.02)", "light−", show=False), Binding("L", "nudge('l',0.02)", "light+", show=False),
-            Binding("e", "edit", "edit hex", show=False), Binding("x", "reset_role", "reset role", show=False),
+            Binding("j", "cursor_down", show=False), Binding("k", "cursor_up", show=False),
+            Binding("h", "nudge('h',-6)", show=False), Binding("H", "nudge('h',6)", show=False),
+            Binding("s", "nudge('s',-0.04)", show=False), Binding("S", "nudge('s',0.04)", show=False),
+            Binding("l", "nudge('l',-0.02)", show=False), Binding("L", "nudge('l',0.02)", show=False),
+            Binding("e", "edit", show=False), Binding("x", "reset_role", show=False),
         ]
 
         def action_nudge(self, ch: str, amt: float) -> None:
-            self.app.nudge(ch, amt)
+            self.parent.nudge(ch, amt)
 
         def action_edit(self) -> None:
-            self.app.query_one("#hex", Input).focus()
+            self.parent.query_one(Input).focus()
 
         def action_reset_role(self) -> None:
-            self.app.reset_role()
+            self.parent.reset_role()
+
+    class ColorEditor(Vertical):
+        """A table of colors plus a hex field — used for the 16 roles and the 16 terminal colors."""
+
+        def __init__(self, keys: list[str], eid: str) -> None:
+            super().__init__(id=eid)
+            self.keys, self.eid = keys, eid
+
+        def compose(self) -> ComposeResult:
+            yield RoleTable(id=f"{self.eid}-table", cursor_type="row")
+            with Horizontal(classes="hexrow"):
+                yield Input(placeholder="#RRGGBB", id=f"{self.eid}-hex", max_length=7)
+                yield Static(id=f"{self.eid}-info", classes="info")
+
+        def on_mount(self) -> None:
+            t = self.query_one(RoleTable)
+            t.add_column("role", key="role", width=16)
+            t.add_column("", key="sw", width=3)
+            t.add_column("hex", key="hex", width=9)
+            t.add_column("cr", key="cr", width=4)
+            for k in self.keys:
+                c = self.app.get_color(k)
+                t.add_row(self.app.label_for(k), sw(c), c, f"{contrast(c, self.app.pal['bg']):.1f}", key=k)
+            self.refresh_info()
+
+        def cur_key(self) -> str | None:
+            t = self.query_one(RoleTable)
+            if t.row_count == 0:
+                return None
+            try:
+                return t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
+            except Exception:   # noqa: BLE001
+                return None
+
+        def refresh_colors(self) -> None:
+            t = self.query_one(RoleTable)
+            for k in self.keys:
+                c = self.app.get_color(k)
+                t.update_cell(k, "sw", sw(c))
+                t.update_cell(k, "hex", c)
+                t.update_cell(k, "cr", f"{contrast(c, self.app.pal['bg']):.1f}")
+            self.refresh_info()
+
+        def refresh_info(self) -> None:
+            k = self.cur_key()
+            if not k:
+                return
+            c = self.app.get_color(k)
+            h, s, l = h2hsl(c)
+            self.query_one(f"#{self.eid}-info", Static).update(
+                f"H{h:4.0f}° S{s * 100:3.0f} L{l * 100:3.0f} · {contrast(c, self.app.pal['bg']):.1f}:1")
+            inp = self.query_one(Input)
+            if not inp.has_focus:
+                inp.value = c
+
+        def nudge(self, ch: str, amt: float) -> None:
+            k = self.cur_key()
+            if not k:
+                return
+            h, s, l = h2hsl(self.app.get_color(k))
+            if ch == "h":
+                h += amt
+            elif ch == "s":
+                s = _clamp(s + amt, 0.0, 1.0)
+            else:
+                l = _clamp(l + amt, 0.0, 1.0)
+            self.app.set_color(k, hsl2h(h, s, l))
+            self.app.refresh_all()
+
+        def reset_role(self) -> None:
+            k = self.cur_key()
+            if not k:
+                return
+            self.app.set_color(k, self.app.applied.ansi[int(k[5:])] if k.startswith("ansi:") else self.app.applied.roles[k])
+            self.app.refresh_all()
+            self.app.status(f"{self.app.label_for(k)} reset to the last applied value")
+
+        @on(DataTable.RowHighlighted)
+        def _hl(self, _e) -> None:
+            self.refresh_info()
+
+        @on(Input.Submitted)
+        def _hex_submit(self, e: Input.Submitted) -> None:
+            k, v = self.cur_key(), norm_hex(e.value)
+            if not k or not v:
+                self.app.status(f"'{e.value}' isn't a hex color — try #RRGGBB")
+                return
+            self.app.set_color(k, v)
+            self.app.refresh_all()
+            self.query_one(RoleTable).focus()
+            self.app.status(f"{self.app.label_for(k)} → {v}")
 
     class TargetTable(DataTable):
         BINDINGS = [Binding("space", "toggle", show=False), Binding("j", "cursor_down", show=False),
                     Binding("k", "cursor_up", show=False)]
 
         def action_toggle(self) -> None:
-            self.app.toggle_target(self.app.cur_target())
+            try:
+                key = self.coordinate_to_cell_key(self.cursor_coordinate).row_key.value
+            except Exception:   # noqa: BLE001
+                return
+            self.app.toggle_target(key)
+
+    # ── one transparency control: label, ◂ bar ▸, percent ──
+    BAR = 16
+    L_LABEL, L_DOWN, L_BAR, L_UP = 2, 22, 24, 41   # x positions, for mouse clicks
+
+    class OpacityRow(Static, can_focus=True):
+        BINDINGS = [
+            Binding("left,h", "step(-1)", show=False), Binding("right,l", "step(1)", show=False),
+            Binding("H,shift+left", "step(-5)", show=False), Binding("L,shift+right", "step(5)", show=False),
+            Binding("x", "reset", show=False),
+            Binding("down,j", "app.focus_next", show=False), Binding("up,k", "app.focus_previous", show=False),
+        ]
+
+        def __init__(self, skey: str, label: str, lo: float, hi: float, master: bool = False) -> None:
+            super().__init__("", id=f"op-{skey}")
+            self.skey, self.label, self.lo, self.hi, self.master = skey, label, lo, hi, master
+            self.value = 1.0
+            self.saved: float | None = None   # None = this surface isn't set up here
+
+        @property
+        def usable(self) -> bool:
+            return self.master or self.saved is not None
+
+        def redraw(self) -> None:
+            r = self.app.pal.roles
+            t = Text(no_wrap=True)
+            if not self.usable:
+                t.append("  " + self.label.ljust(20), style=r["fg_dim"])
+                t.append("not found in your configs", style=r["fg_dim"])
+                self.update(t)
+                return
+            staged = self.saved is not None and abs(self.value - self.saved) > 0.004
+            t.append("● " if staged else "  ", style=r["warning"])
+            t.append(self.label.ljust(20), style=r["fg_bright"] if self.master else r["fg"])
+            t.append("◂ ", style=r["accent"])
+            span = max(0.001, self.hi - self.lo)
+            fill = round(BAR * _clamp((self.value - self.lo) / span, 0.0, 1.0))
+            t.append("█" * fill, style=r["accent"])
+            t.append("░" * (BAR - fill), style=r["violet"])
+            t.append(" ▸ ", style=r["accent"])
+            t.append(f"{round(self.value * 100):>3}%", style=r["fg_bright"])
+            self.update(t)
+
+        def set_value(self, v: float, quiet: bool = False) -> None:
+            self.value = round(_clamp(v, self.lo, self.hi), 2)
+            self.redraw()
+            if not quiet:
+                self.app.opacity_changed(self)
+
+        def action_step(self, n: int) -> None:
+            if self.usable:
+                self.app.step_opacity(self, n * 0.02)
+
+        def action_reset(self) -> None:
+            if self.saved is not None:
+                self.set_value(self.saved)
+
+        def on_click(self, event) -> None:
+            if not self.usable:
+                return
+            x = event.x
+            if L_BAR <= x < L_BAR + BAR:
+                self.app.set_opacity_from_bar(self, (x - L_BAR + 0.5) / BAR)
+            elif L_DOWN <= x < L_BAR:
+                self.action_step(-1)
+            elif x >= L_UP - 1 and x < L_UP + 2:
+                self.action_step(1)
 
     class ThemeSettings(App):
         TITLE = APP_NAME
         ansi_color = True   # keeps the terminal's own background (and transparency) under everything
         CSS = """
         Screen { background: ansi_default; color: $foreground; layout: vertical; }
-        #top { height: 1; background: ansi_default; padding: 0; }
-        #main { height: 1fr; background: ansi_default; }
-        #left { width: 50; background: ansi_default; }
-        #right { width: 1fr; background: ansi_default; }
-        #lower { height: 1fr; background: ansi_default; }
+        #top { height: 1; background: ansi_default; }
+        #top-left { width: 1fr; height: 1; background: ansi_default; }
+        #page { height: 1fr; background: ansi_default; padding: 0 1; scrollbar-size-vertical: 1;
+                scrollbar-background: ansi_default; scrollbar-background-hover: ansi_default;
+                scrollbar-background-active: ansi_default; scrollbar-color: $box;
+                scrollbar-color-hover: $acc; scrollbar-color-active: $acc; }
         #status { height: 1; padding: 0 1; color: $dim; background: ansi_default; }
         #keys { height: 1; padding: 0 1; color: $dim; background: ansi_default; }
 
         .box { border: solid $box; border-title-color: $dim; border-title-style: bold;
-               background: ansi_default; padding: 0 1; }
+               background: ansi_default; padding: 0 1; height: auto; }
         .box:focus-within { border: solid $boxhi; border-title-color: $acc; }
-        #roles-box { height: 1fr; }
         #preview { height: 9; }
-        #wall-box { height: auto; }
-        #targets-box { width: 44; }
-        #log-box { width: 1fr; }
-        Screen.-narrow #targets-box { width: 1fr; }
-        Screen.-narrow #log-box { display: none; }
+        #wp-line, #hue-line { height: 1; background: ansi_default; }
+        .row { height: 1; background: ansi_default; }
 
-        #roles { height: 1fr; }
-        #targets { height: 1fr; }
-        #hexrow, #presets, #acts1, #acts2, #tacts1, #tacts2 { height: 1; background: ansi_default; }
-        #info { width: 1fr; height: 1; color: $dim; background: ansi_default; padding: 0 1; }
-        #wp-info, #clusters { height: auto; background: ansi_default; color: $dim; }
+        Collapsible { background: ansi_default; border: none; padding: 0; margin: 0; width: 1fr; }
+        Collapsible > Contents { padding: 0 0 1 3; background: ansi_default; height: auto; }
+        CollapsibleTitle { background: ansi_default; color: $foreground; padding: 0 1; width: 1fr; }
+        CollapsibleTitle:hover { background: $sel; color: $acc; }
+        CollapsibleTitle:focus { background: $sel; color: $fgb; text-style: bold; }
 
         DataTable { background: ansi_default; color: $foreground; border: none; padding: 0;
-                    scrollbar-size-vertical: 1; scrollbar-background: ansi_default;
-                    scrollbar-background-hover: ansi_default; scrollbar-background-active: ansi_default;
-                    scrollbar-color: $box; scrollbar-color-hover: $acc; scrollbar-color-active: $acc; }
+                    height: auto; max-height: 36; scrollbar-size-vertical: 1;
+                    scrollbar-background: ansi_default; scrollbar-background-hover: ansi_default;
+                    scrollbar-background-active: ansi_default; scrollbar-color: $box;
+                    scrollbar-color-hover: $acc; scrollbar-color-active: $acc; }
         DataTable > .datatable--header { background: ansi_default; color: $dim; text-style: bold; }
         DataTable > .datatable--cursor { background: $sel; color: $fgb; text-style: bold; }
         DataTable > .datatable--hover { background: $sel; }
@@ -2005,32 +2384,46 @@ def run_tui(args) -> int:
         DataTable > .datatable--even-row { background: ansi_default; }
         DataTable:focus > .datatable--cursor { background: $sel; color: $acc; }
 
+        ColorEditor { height: auto; background: ansi_default; }
+        .hexrow { height: 1; background: ansi_default; }
+        .info { width: 1fr; height: 1; color: $dim; background: ansi_default; padding: 0 1; }
         Input { background: ansi_default; border: none; height: 1; padding: 0 1; color: $foreground; }
         Input:focus { background: $sel; border: none; }
         Input > .input--placeholder { color: $dim; }
         Input > .input--cursor { background: $acc; color: $bgc; }
         Input > .input--selection { background: $sel; }
-        #hex { width: 10; }
-        #preset-name { width: 14; }
+        .hexrow Input { width: 10; }
+        #preset-name { width: 16; }
+        #wp-path { width: 1fr; }
 
-        RichLog { background: ansi_default; color: $foreground; padding: 0; border: none;
+        OpacityRow { height: 1; background: ansi_default; }
+        OpacityRow:hover { background: $sel; }
+        OpacityRow:focus { background: $sel; }
+        #targets { max-height: 16; }
+        RichLog { background: ansi_default; color: $foreground; padding: 0; border: none; height: 9;
                   scrollbar-size-vertical: 1; scrollbar-background: ansi_default;
                   scrollbar-color: $box; scrollbar-color-hover: $acc; }
+        VerticalScroll, Vertical, Horizontal, Static { background: ansi_default; }
 
         Act { width: auto; height: 1; padding: 0 1; margin-right: 1; background: ansi_default; }
         Act:hover { background: $sel; }
         Act:focus { background: $sel; text-style: underline; }
         """
+        SECTIONS = ["colors", "terminal", "transparency", "presets", "targets", "source", "log"]
         BINDINGS = [
             Binding("q", "quit", "quit"),
             Binding("g", "generate", "generate"), Binding("w", "use_current_key", "current wallpaper"),
-            Binding("n", "next_variant", "variant"), Binding("y", "cycle_style", "style"),
+            Binding("v", "next_variant", "variant"), Binding("y", "cycle_style", "style"),
             Binding("[", "wall_prev", "prev wallpaper"), Binding("]", "wall_next", "next wallpaper"),
             Binding("A", "apply_now", "apply"), Binding("a", "apply_now", "apply", show=False),
             Binding("d", "dry_run", "dry run"), Binding("u", "undo", "undo"),
             Binding("r", "toggle_repo", "repo"), Binding("R", "toggle_reload", "reload"),
             Binding("p", "next_preset", "preset"), Binding("ctrl+s", "save_preset", "save preset"),
             Binding("0", "reset_all", "default theme"),
+            Binding("1", "section('colors')", show=False), Binding("2", "section('terminal')", show=False),
+            Binding("3", "section('transparency')", show=False), Binding("4", "section('presets')", show=False),
+            Binding("5", "section('targets')", show=False), Binding("6", "section('source')", show=False),
+            Binding("7", "section('log')", show=False),
         ]
 
         # ── setup ──
@@ -2048,6 +2441,7 @@ def run_tui(args) -> int:
             self.do_reload = True
             self.use_repo = False
             self.sel_targets = {t.key for t in TARGETS if t.default}
+            self.last_status = "ready"
             self._theme_flip = False
             try:
                 self._state_mtime = STATE_FILE.stat().st_mtime
@@ -2063,107 +2457,90 @@ def run_tui(args) -> int:
             self.theme = name
 
         def compose(self) -> ComposeResult:
-            yield Static(id="top")
-            with Horizontal(id="main"):
-                with Vertical(id="left"):
-                    with Vertical(id="roles-box", classes="box") as rb:
-                        rb.border_title = "PALETTE"
-                        yield RoleTable(id="roles", cursor_type="row")
-                        with Horizontal(id="hexrow"):
-                            yield Input(placeholder="#RRGGBB", id="hex", max_length=7)
-                            yield Static(id="info")
-                        with Horizontal(id="presets"):
-                            yield Input(placeholder="preset", id="preset-name")
-                            yield Act("save", "s", id="ps-save")
-                            yield Act("next", "n", id="ps-next")
-                            yield Act("default", "d", id="ps-reset")
-                with Vertical(id="right"):
-                    pv = Static(id="preview", classes="box")
-                    pv.border_title = "PREVIEW"
-                    yield pv
-                    with Vertical(id="wall-box", classes="box") as wb:
-                        wb.border_title = "WALLPAPER"
-                        yield Static(id="wp-info")
-                        yield Input(placeholder="image path — enter to load", id="wp-path")
-                        yield Static(id="clusters")
-                        with Horizontal(id="acts1"):
-                            yield Act("current", "c", id="wp-current")
-                            yield Act("‹ prev", "p", id="wp-prev")
-                            yield Act("next ›", "x", id="wp-next")
-                            yield Act("generate", "g", id="wp-gen")
-                        with Horizontal(id="acts2"):
-                            yield Act("variant", "v", id="wp-variant")
-                            yield Act("style: balanced", "s", id="wp-style")
-                            yield Act("apply to rice", "a", id="wp-apply", primary=True)
-                    with Horizontal(id="lower"):
-                        with Vertical(id="targets-box", classes="box") as tb:
-                            tb.border_title = "TARGETS"
-                            yield TargetTable(id="targets", cursor_type="row", show_header=False)
-                            with Horizontal(id="tacts1"):
-                                yield Act("apply", "a", id="do-apply", primary=True)
-                                yield Act("dry run", "d", id="do-dry")
-                                yield Act("undo", "u", id="do-undo")
-                            with Horizontal(id="tacts2"):
-                                yield Act("repo: off", "r", id="tog-repo")
-                                yield Act("reload: on", "R", id="tog-reload")
-                        with Vertical(id="log-box", classes="box") as lb:
-                            lb.border_title = "LOG"
-                            yield RichLog(id="log", wrap=False, markup=False, highlight=False)
+            with Horizontal(id="top"):
+                yield Static(id="top-left")
+                yield Act("quit", "q", id="quit")
+            with VerticalScroll(id="page"):
+                pv = Static(id="preview", classes="box")
+                pv.border_title = "PREVIEW"
+                yield pv
+                with Vertical(id="wall", classes="box") as wb:
+                    wb.border_title = "WALLPAPER"
+                    yield Static(id="wp-line")
+                    yield Static(id="hue-line")
+                    with Horizontal(classes="row"):
+                        yield Act("generate", "g", id="wp-gen")
+                        yield Act("variant", "v", id="wp-variant")
+                        yield Act("style: balanced", "y", id="wp-style")
+                        yield Act("apply", "a", id="wp-apply", primary=True)
+                        yield Act("undo", "u", id="wp-undo")
+                self.sec = {}
+                for name, kids in (
+                    ("colors", [ColorEditor(ROLE_KEYS, "roles")]),
+                    ("terminal", [ColorEditor([f"ansi:{i}" for i in range(16)], "ansi")]),
+                    ("transparency", self.transparency_widgets()),
+                    ("presets", [Horizontal(Input(placeholder="name", id="preset-name"),
+                                            Act("save", "s", id="ps-save"), Act("next", "n", id="ps-next"),
+                                            Act("default theme", "d", id="ps-reset"), classes="row")]),
+                    ("targets", [TargetTable(id="targets", cursor_type="row", show_header=False),
+                                 Horizontal(Act("dry run", "d", id="do-dry"), Act("repo: off", "r", id="tog-repo"),
+                                            Act("reload: on", "R", id="tog-reload"), classes="row")]),
+                    ("source", [Static(id="wp-info"),
+                                Horizontal(Input(placeholder="image path — enter to load", id="wp-path"), classes="row"),
+                                Horizontal(Act("current", "c", id="wp-current"), Act("‹ prev", "p", id="wp-prev"),
+                                           Act("next ›", "x", id="wp-next"), classes="row"),
+                                Static(id="clusters")]),
+                    ("log", [RichLog(id="log", wrap=False, markup=False, highlight=False)]),
+                ):
+                    col = Collapsible(*kids, title=self.title_for(name), collapsed=True,
+                                      collapsed_symbol="▸", expanded_symbol="▾", id=f"sec-{name}")
+                    self.sec[name] = col
+                    yield col
             yield Static(id="status")
             yield Static(id="keys")
 
+        def transparency_widgets(self) -> list:
+            self.op_rows = [OpacityRow("all", "everything", 0.2, 1.0, master=True)]
+            for sf in SURFACES:
+                self.op_rows.append(OpacityRow(sf.key, sf.label, sf.lo, sf.hi))
+            return [*self.op_rows,
+                    Horizontal(Act("apply transparency", "t", id="op-apply", primary=True),
+                               Act("reset", "x", id="op-reset"), classes="row")]
+
         def on_mount(self) -> None:
-            t = self.query_one("#roles", RoleTable)
-            t.add_column("role", key="role", width=16)
-            t.add_column("", key="sw", width=3)
-            t.add_column("hex", key="hex", width=9)
-            t.add_column("cr", key="cr", width=4)
-            for k in self.row_keys():
-                c = self.get_color(k)
-                t.add_row(self.label_for(k), sw(c), c, f"{contrast(c, self.pal['bg']):.1f}", key=k)
             tt = self.query_one("#targets", TargetTable)
             tt.add_column("", key="mark", width=2)
             tt.add_column("", key="label")
             for tg in TARGETS:
                 tt.add_row(self.mark(tg.key), tg.label, key=tg.key)
+            for row in self.op_rows:
+                if not row.master:
+                    v = read_opacity(SURFACE_BY_KEY[row.skey])
+                    row.saved = v
+                    row.value = v if v is not None else 1.0
+            self.sync_master()
             self.refresh_all()
             self.set_interval(1.5, self.check_external)
-            self.status("ready — h/s/l nudge the selected color · e types a hex · g builds a palette from your wallpaper")
-            t.focus()
+            self.status("g builds a palette from your wallpaper · A applies it · 1–7 open the sections below")
             self.query_one("#log", RichLog).write("nothing applied this session yet")
-
-        def on_resize(self) -> None:
-            self.screen.set_class(self.size.width < 120, "-narrow")   # too tight for a log column
-            self.refresh_top()
-            self.refresh_keys()
-            if self.is_mounted:
-                self.refresh_preview()
+            self.query_one("#wp-gen", Act).focus()
 
         # ── small helpers ──
         def status(self, msg: str) -> None:
+            self.last_status = msg
             self.query_one("#status", Static).update(msg)
+            self.refresh_titles()
 
         def mark(self, key: str) -> Text:
             r = self.pal.roles
             return Text("■", style=r["accent"]) if key in self.sel_targets else Text("□", style=r["fg_dim"])
-
-        def cur_target(self) -> str | None:
-            t = self.query_one("#targets", TargetTable)
-            if t.row_count == 0:
-                return None
-            try:
-                return t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
-            except Exception:   # noqa: BLE001
-                return None
 
         def toggle_target(self, key: str | None) -> None:
             if not key:
                 return
             self.sel_targets.symmetric_difference_update({key})
             self.query_one("#targets", TargetTable).update_cell(key, "mark", self.mark(key))
-
-        def row_keys(self) -> list[str]:
-            return ROLE_KEYS + [f"ansi:{i}" for i in range(16)]
+            self.refresh_titles()
 
         def get_color(self, key: str) -> str:
             return self.pal.ansi[int(key[5:])] if key.startswith("ansi:") else self.pal.roles[key]
@@ -2183,80 +2560,138 @@ def run_tui(args) -> int:
             lbl = ROLE_LABEL[key][0]
             return lbl if key in BASE_KEYS else f"· {lbl}"
 
-        def cur_key(self) -> str | None:
-            t = self.query_one("#roles", RoleTable)
-            if t.row_count == 0:
-                return None
-            try:
-                return t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
-            except Exception:   # noqa: BLE001
-                return None
-
         def dirty(self) -> bool:
             return self.pal.roles != self.applied.roles or self.pal.ansi != self.applied.ansi
 
+        # ── transparency state ──
+        def staged_opacity(self) -> dict[str, float]:
+            return {r.skey: r.value for r in self.op_rows
+                    if not r.master and r.saved is not None and abs(r.value - r.saved) > 0.004}
+
+        def sync_master(self) -> None:
+            real = [r for r in self.op_rows if not r.master and r.saved is not None]
+            master = self.op_rows[0]
+            if real:
+                master.value = round(sum(r.value for r in real) / len(real), 2)
+            master.redraw()
+
+        def opacity_changed(self, row) -> None:
+            if row.master:   # the master row moves every surface by the same amount
+                real = [r for r in self.op_rows if not r.master and r.saved is not None]
+                avg = sum(r.value for r in real) / len(real) if real else row.value
+                delta = row.value - avg
+                for r in real:
+                    r.set_value(r.value + delta, quiet=True)
+            self.sync_master()
+            self.refresh_titles()
+            self.refresh_top()
+
+        def step_opacity(self, row, delta: float) -> None:
+            row.set_value(row.value + delta)
+
+        def set_opacity_from_bar(self, row, frac: float) -> None:
+            row.set_value(row.lo + (row.hi - row.lo) * _clamp(frac, 0.0, 1.0))
+
         # ── drawing ──
+        def title_for(self, name: str) -> str:
+            r = self.pal.roles
+            dim = mix(r["fg_dim"], r["bg"], 0.2)
+            num = self.SECTIONS.index(name) + 1
+            head = f"[bold {r['accent']}]{num}[/] {name if name != 'targets' else 'apply to'}"
+            extra = ""
+            if name == "colors":
+                extra = swatches([r[k] for k, _, _ in BASE_ROLES])
+            elif name == "terminal":
+                extra = swatches(self.pal.ansi)
+            elif name == "transparency":
+                real = [x for x in getattr(self, "op_rows", []) if not x.master and x.saved is not None]
+                if real:
+                    avg = round(sum(x.value for x in real) / len(real) * 100)
+                    staged = len(self.staged_opacity())
+                    extra = f"[{dim}]avg {avg}%[/]" + (f"  [{r['warning']}]● {staged} unsaved[/]" if staged else "")
+            elif name == "presets":
+                extra = f"[{dim}]{self.pal.name}[/]"
+            elif name == "targets":
+                extra = f"[{dim}]{len(self.sel_targets)} of {len(TARGETS)}[/]"
+            elif name == "source":
+                extra = f"[{dim}]{self.img.name if self.img else 'no image yet'}[/]"
+            elif name == "log":
+                extra = f"[{dim}]{self.last_status[:48]}[/]"
+            label = name if name != "targets" else "apply to"
+            pad = " " * max(2, 18 - len(f"{num} {label}"))   # summaries line up in one column
+            return head + (f"{pad}{extra}" if extra else "")
+
+        def refresh_titles(self) -> None:
+            if not hasattr(self, "sec"):
+                return
+            for name, col in self.sec.items():
+                col.title = self.title_for(name)
+
         def refresh_all(self) -> None:
             self.wear_theme()
-            t = self.query_one("#roles", RoleTable)
-            for k in self.row_keys():
-                c = self.get_color(k)
-                t.update_cell(k, "sw", sw(c))
-                t.update_cell(k, "hex", c)
-                t.update_cell(k, "cr", f"{contrast(c, self.pal['bg']):.1f}")
+            for ed in self.query(ColorEditor):
+                ed.refresh_colors()
             tt = self.query_one("#targets", TargetTable)
             for tg in TARGETS:
                 tt.update_cell(tg.key, "mark", self.mark(tg.key))
             for act in self.query(Act):
                 act.redraw()
+            for row in self.op_rows:
+                row.redraw()
             self.refresh_preview()
-            self.refresh_info()
+            self.refresh_wall()
             self.refresh_top()
+            self.refresh_titles()
             self.refresh_keys()
 
         def refresh_top(self) -> None:
             r = self.pal.roles
             width = max(40, self.size.width)
-            left = Text()
+            left = Text(no_wrap=True, overflow="ellipsis")
             left.append(f" {APP_NAME.upper()} ", style=f"bold {r['bg']} on {r['accent']}")
             left.append(f"  {self.pal.name}", style=f"bold {r['fg_bright']}")
-            if self.dirty():
+            if self.dirty() or self.staged_opacity():
                 left.append(" ●", style=r["warning"])
-            msg, kind = hue_summary(self.pal)
-            col = {"ok": r["success"], "warn": r["warning"], "dim": r["fg_dim"]}[kind]
-            right = Text()
-            right.append(msg + "  ", style=col)
-            right.append("q", style=f"bold {r['accent']}")
-            right.append(" quit ", style=r["fg_dim"])
-            gap = max(1, width - left.cell_len - right.cell_len)
-            line = Text()
-            line.append_text(left)
-            line.append(" " * gap)
-            line.append_text(right)
-            line.no_wrap = True
-            line.overflow = "ellipsis"
-            self.query_one("#top", Static).update(line)
+            self.query_one("#top-left", Static).update(left)
+
+        def on_resize(self) -> None:
+            self.refresh_top()
+            self.refresh_keys()
+            if self.is_mounted:
+                self.refresh_preview()
 
         def refresh_keys(self) -> None:
             r = self.pal.roles
-            hints = [("h s l", "adjust"), ("e", "hex"), ("x", "reset"), ("g", "generate"), ("n", "variant"),
-                     ("y", "style"), ("A", "apply"), ("u", "undo"), ("tab", "move")]
+            hints = [("g", "generate"), ("v", "variant"), ("y", "style"), ("A", "apply"), ("u", "undo"),
+                     ("1-7", "sections"), ("tab", "move"), ("q", "quit")]
             t = Text(no_wrap=True, overflow="ellipsis")
             for k, v in hints:
                 t.append(k, style=f"bold {r['accent']}")
                 t.append(f" {v}   ", style=r["fg_dim"])
             self.query_one("#keys", Static).update(t)
 
-        def refresh_info(self) -> None:
-            k = self.cur_key()
-            if not k:
-                return
-            c = self.get_color(k)
-            h, s, l = h2hsl(c)
-            self.query_one("#info", Static).update(f"H{h:4.0f}° S{s * 100:3.0f} L{l * 100:3.0f} · {contrast(c, self.pal['bg']):.1f}:1")
-            inp = self.query_one("#hex", Input)
-            if not inp.has_focus:
-                inp.value = c
+        def refresh_wall(self, cl=None) -> None:
+            r = self.pal.roles
+            msg, kind = hue_summary(self.pal)
+            col = {"ok": r["success"], "warn": r["warning"], "dim": r["fg_dim"]}[kind]
+            line = Text(no_wrap=True, overflow="ellipsis")
+            line.append("image  ", style=r["fg_dim"])
+            line.append(self.img.name if self.img else "none yet — press g", style=r["fg_bright"])
+            self.query_one("#wp-line", Static).update(line)
+            hue = Text(no_wrap=True, overflow="ellipsis")
+            hue.append("hues   ", style=r["fg_dim"])
+            if self.pal.neutral:
+                hue.append("██", style="#808080")
+            for h in self.pal.hues[:10]:
+                hue.append("██", style=hsl2h(h, 0.6, 0.55))
+            hue.append("  " + msg, style=col)
+            self.query_one("#hue-line", Static).update(hue)
+            if cl is not None:
+                t = Text(no_wrap=True, overflow="ellipsis")
+                t.append("colors ", style=r["fg_dim"])
+                for c in cl[:16]:
+                    t.append("██", style=c.hex)
+                self.query_one("#clusters", Static).update(t)
 
         def refresh_preview(self) -> None:
             r = self.pal.roles
@@ -2283,120 +2718,65 @@ def run_tui(args) -> int:
             ans = [(" ", r["fg"])] + [("██", self.pal.ansi[i]) for i in range(8)] + [("  ", r["fg"])] + \
                   [("██", self.pal.ansi[i]) for i in range(8, 16)]
             line(ans, r["bg"])
-            T.append(" " * 0)
             line([(" ", r["fg"]), (" Notification ", r["fg_bright"], r["surface"], 1), ("  ", r["fg"]),
                   (" Accent ", r["bg"], r["accent"], 1), (" ", r["fg"]), (" Pink ", r["fg_bright"], r["pink"], 1)],
                  r["bg_deep"])
             T.rstrip()
             self.query_one("#preview", Static).update(T)
 
-        def refresh_wall_info(self, cl=None) -> None:
-            r = self.pal.roles
-            msg, kind = hue_summary(self.pal)
-            col = {"ok": r["success"], "warn": r["warning"], "dim": r["fg_dim"]}[kind]
-            t = Text(no_wrap=True, overflow="ellipsis")
-            if cl:
-                t.append("colors ", style=r["fg_dim"])
-                for c in cl[:14]:
-                    t.append("██", style=c.hex)
-                t.append("\n")
-            t.append("hues   ", style=r["fg_dim"])
-            if self.pal.neutral:
-                t.append("██", style="#808080")
-            for h in self.pal.hues:
-                t.append("██", style=hsl2h(h, 0.6, 0.55))
-            if self.pal.hues:
-                t.append("  " + " ".join(f"{h:.0f}°" for h in self.pal.hues[:6]), style=r["fg_dim"])
-            t.append(f"\n{msg}", style=col)
-            self.query_one("#clusters", Static).update(t)
+        # ── sections ──
+        def action_section(self, name: str) -> None:
+            col = self.sec[name]
+            col.collapsed = not col.collapsed
+            if col.collapsed:
+                self.set_focus(None)
+                self.call_after_refresh(lambda: col.query_one("CollapsibleTitle").focus())
+                return
+            first = {"colors": "#roles-table", "terminal": "#ansi-table", "transparency": "#op-all",
+                     "presets": "#preset-name", "targets": "#targets", "source": "#wp-path", "log": "#log"}[name]
+
+            def focus() -> None:
+                try:
+                    self.query_one(first).focus()
+                    col.scroll_visible()
+                except Exception:   # noqa: BLE001
+                    pass
+
+            self.call_after_refresh(focus)
+
+        def open_section(self, name: str) -> None:
+            self.sec[name].collapsed = False
 
         # ── events ──
-        @on(DataTable.RowHighlighted, "#roles")
-        def _hl(self, _e) -> None:
-            self.refresh_info()
-
-        @on(DataTable.RowSelected, "#targets")
-        def _target_pick(self, e: DataTable.RowSelected) -> None:
-            self.toggle_target(e.row_key.value)
-
-        @on(Input.Submitted, "#hex")
-        def _hex_submit(self, e: Input.Submitted) -> None:
-            k = self.cur_key()
-            v = norm_hex(e.value)
-            if not k or not v:
-                self.status(f"'{e.value}' isn't a hex color — try #RRGGBB")
-                return
-            self.set_color(k, v)
-            self.refresh_all()
-            self.query_one("#roles", RoleTable).focus()
-            self.status(f"{self.label_for(k)} → {v}")
-
         @on(Input.Submitted, "#wp-path")
         def _wp_path(self, e: Input.Submitted) -> None:
             self.load_image(Path(e.value).expanduser())
+            self.generate()
 
         @on(Input.Submitted, "#preset-name")
         def _preset_enter(self, _e) -> None:
             self.action_save_preset()
 
+        @on(DataTable.RowSelected, "#targets")
+        def _target_pick(self, e: DataTable.RowSelected) -> None:
+            self.toggle_target(e.row_key.value)
+
         @on(Act.Pressed)
         def _act(self, e: Act.Pressed) -> None:
             i = e.act.id
-            if i == "ps-save":
-                self.action_save_preset()
-            elif i == "ps-next":
-                self.action_next_preset()
-            elif i == "ps-reset":
-                self.action_reset_all()
-            elif i == "wp-current":
-                self.action_use_current_key()
-            elif i == "wp-prev":
-                self.action_wall_prev()
-            elif i == "wp-next":
-                self.action_wall_next()
-            elif i == "wp-gen":
-                self.action_generate()
-            elif i == "wp-variant":
-                self.action_next_variant()
-            elif i == "wp-style":
-                self.action_cycle_style()
-            elif i in ("wp-apply", "do-apply"):
-                self.action_apply_now()
-            elif i == "do-dry":
-                self.action_dry_run()
-            elif i == "do-undo":
-                self.action_undo()
-            elif i == "tog-repo":
-                self.action_toggle_repo()
-            elif i == "tog-reload":
-                self.action_toggle_reload()
+            actions = {
+                "quit": self.action_quit, "wp-gen": self.action_generate, "wp-variant": self.action_next_variant,
+                "wp-style": self.action_cycle_style, "wp-apply": self.action_apply_now, "wp-undo": self.action_undo,
+                "ps-save": self.action_save_preset, "ps-next": self.action_next_preset,
+                "ps-reset": self.action_reset_all, "do-dry": self.action_dry_run,
+                "tog-repo": self.action_toggle_repo, "tog-reload": self.action_toggle_reload,
+                "wp-current": self.action_use_current_key, "wp-prev": self.action_wall_prev,
+                "wp-next": self.action_wall_next, "op-apply": self.apply_transparency, "op-reset": self.reset_opacity,
+            }
+            if i in actions:
+                actions[i]()
 
-        # ── palette editing ──
-        def nudge(self, ch: str, amt: float) -> None:
-            k = self.cur_key()
-            if not k:
-                return
-            h, s, l = h2hsl(self.get_color(k))
-            if ch == "h":
-                h += amt
-            elif ch == "s":
-                s = _clamp(s + amt, 0.0, 1.0)
-            else:
-                l = _clamp(l + amt, 0.0, 1.0)
-            self.set_color(k, hsl2h(h, s, l))
-            self.refresh_all()
-
-        def reset_role(self) -> None:
-            k = self.cur_key()
-            if not k:
-                return
-            if k.startswith("ansi:"):
-                self.set_color(k, self.applied.ansi[int(k[5:])])
-            else:
-                self.set_color(k, self.applied.roles[k])
-            self.refresh_all()
-            self.status(f"{self.label_for(k)} reset to the last applied value")
-
+        # ── palette ──
         def action_save_preset(self) -> None:
             nm = self.query_one("#preset-name", Input).value.strip() or self.pal.name
             f = save_preset(self.pal, nm)
@@ -2416,14 +2796,13 @@ def run_tui(args) -> int:
         def action_reset_all(self) -> None:
             self.pal = default_palette()
             self.refresh_all()
-            self.refresh_wall_info()
             self.status("back to the rice's default theme")
 
         # ── wallpaper ──
         def action_use_current_key(self) -> None:
             img, note = detect_wallpaper()
             if not img:
-                self.status("couldn't find your wallpaper — type a path in the wallpaper box")
+                self.status("couldn't find your wallpaper — open section 6 and type a path")
                 return
             self.load_image(img, note)
             self.generate()
@@ -2443,21 +2822,19 @@ def run_tui(args) -> int:
             self.query_one("#wp-path", Input).value = str(p)
             r = self.pal.roles
             t = Text(no_wrap=True, overflow="ellipsis")
-            t.append("image  ", style=r["fg_dim"])
-            t.append(p.name, style=r["fg_bright"])
+            t.append(str(p), style=r["fg_bright"])
             if note:
                 t.append(f"   {note}", style=r["fg_dim"])
             self.query_one("#wp-info", Static).update(t)
+            self.refresh_wall()
+            self.refresh_titles()
 
         def step_wallpaper(self, delta: int) -> None:
             files = list_wallpapers()
             if not files:
                 self.status("no images in ~/Wallpapers")
                 return
-            try:
-                i = (files.index(self.img) + delta) % len(files) if self.img in files else 0
-            except ValueError:
-                i = 0
+            i = (files.index(self.img) + delta) % len(files) if self.img in files else 0
             self.load_image(files[i], f"{i + 1}/{len(files)} in ~/Wallpapers")
             self.variant = 0
             self.generate()
@@ -2511,8 +2888,8 @@ def run_tui(args) -> int:
             self.busy = False
             self.pal = pal
             self.refresh_all()
-            self.refresh_wall_info(cl)
-            self.status(f"{pal.name} · {style} · variant {variant} — a applies it, n tries another take")
+            self.refresh_wall(cl)
+            self.status(f"{pal.name} · {style} · variant {variant} — A applies it, v tries another take")
 
         # ── apply / undo ──
         def action_apply_now(self) -> None:
@@ -2532,19 +2909,33 @@ def run_tui(args) -> int:
             self.do_reload = not self.do_reload
             self.query_one("#tog-reload", Act).set_label(f"reload: {'on' if self.do_reload else 'OFF'}")
 
-        def run_apply(self, dry: bool) -> None:
+        def apply_transparency(self) -> None:
+            self.run_apply(dry=False, colors=False)
+
+        def reset_opacity(self) -> None:
+            for r in self.op_rows:
+                if not r.master and r.saved is not None:
+                    r.set_value(r.saved, quiet=True)
+            self.sync_master()
+            self.refresh_titles()
+            self.refresh_top()
+            self.status("transparency back to what is applied")
+
+        def run_apply(self, dry: bool, colors: bool = True) -> None:
             if self.busy:
                 self.status("still reading the wallpaper…")
                 return
-            keys = [t.key for t in TARGETS if t.key in self.sel_targets]
-            if not keys:
-                self.status("no targets selected")
+            keys = [t.key for t in TARGETS if t.key in self.sel_targets] if colors else []
+            opacity = self.staged_opacity()
+            if not keys and not opacity:
+                self.status("nothing to apply — no targets selected and no transparency changes")
                 return
             log = self.query_one("#log", RichLog)
             log.clear()
             hook_msgs: list[str] = []
-            results = apply_palette(self.pal, keys, self.repo if self.use_repo else None, dry,
-                                    self.do_reload, hook_msgs.append)
+            base = self.pal if colors else self.applied
+            results = apply_palette(base, keys, self.repo if self.use_repo else None, dry,
+                                    self.do_reload, hook_msgs.append, opacity=opacity or None)
             c = self.pal.roles
             glyph = {"ok": ("✓", c["success"]), "unchanged": ("·", c["fg_dim"]), "missing": ("–", c["fg_dim"]),
                      "error": ("✗", c["warning"])}
@@ -2567,13 +2958,20 @@ def run_tui(args) -> int:
             if dry:
                 log.write("— dry run, nothing written —")
             else:
-                if errors == 0 and any(r.status in {"ok", "unchanged"} for r in results):
+                if colors and errors == 0 and any(r.status in {"ok", "unchanged"} for r in results):
                     self.applied = self.pal.copy()
+                failed = {r.path for r in results if r.status == "error" and r.target == "opacity"}
+                for row in self.op_rows:   # what was written is now the saved value
+                    if row.skey in opacity and not any(SURFACE_BY_KEY[row.skey].live.split("/")[-1] in f for f in failed):
+                        row.saved = row.value
+                self.sync_master()
                 self.refresh_all()
                 try:
                     self._state_mtime = STATE_FILE.stat().st_mtime
                 except OSError:
                     pass
+            if errors:
+                self.open_section("log")
             self.status(f"{'would change' if dry else 'changed'} {ok} files" + (f" · {errors} failed" if errors else ""))
 
         def action_undo(self) -> None:
@@ -2583,8 +2981,12 @@ def run_tui(args) -> int:
             st = load_state()
             self.pal = finalize(Palette.from_dict(st["applied"]) if st.get("applied") else default_palette(), rederive=False)
             self.applied = self.pal.copy()
+            for row in self.op_rows:   # transparency may have been undone too
+                if not row.master:
+                    v = read_opacity(SURFACE_BY_KEY[row.skey])
+                    row.saved, row.value = v, (v if v is not None else 1.0)
+            self.sync_master()
             self.refresh_all()
-            self.refresh_wall_info()
             try:
                 self._state_mtime = STATE_FILE.stat().st_mtime
             except OSError:
@@ -2611,7 +3013,6 @@ def run_tui(args) -> int:
             if not was_dirty:
                 self.pal = new
                 self.refresh_all()
-                self.refresh_wall_info()
                 self.status("the rice changed outside the app — following it")
             else:
                 self.status("the rice changed outside the app (your unsaved edits are kept)")
@@ -2638,9 +3039,11 @@ def main() -> int:
     ap.add_argument("--save-default", action="store_true",
                     help="snapshot the repo's current rice as the default theme (alice-rice/palette.json)")
     ap.add_argument("--show-default", action="store_true", help="print the default theme")
+    ap.add_argument("--opacity", metavar="a=0.9,b=85", help="set transparency, e.g. kitty=0.85,bar=0.9 or all=0.9")
+    ap.add_argument("--list-opacity", action="store_true", help="show every transparency setting and its value")
     args = ap.parse_args()
     if args.wallpaper or args.image or args.preset or args.restore or args.list_targets \
-            or args.save_default or args.show_default:
+            or args.save_default or args.show_default or args.opacity or args.list_opacity:
         return main_cli(args)
     return run_tui(args)
 
