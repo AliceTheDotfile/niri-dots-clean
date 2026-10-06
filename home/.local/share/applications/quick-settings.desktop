@@ -4,4 +4,4 @@ Name=Quick Settings
 Exec=@HOME@/.local/bin/theme-settings-launch
 Terminal=false
 Categories=Settings;
-Icon=@HOME@/.local/share/icons/iconquick.png
+Icon=@HOME@/.local/share/icons/hicolor/16x16/apps/quick-settings.png

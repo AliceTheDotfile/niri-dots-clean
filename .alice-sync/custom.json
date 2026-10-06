@@ -20,6 +20,10 @@
     {
       "live": "~/.local/share/applications/quick-settings.desktop",
       "repo": "home/.local/share/applications/quick-settings.desktop"
+    },
+    {
+      "live": "~/.local/share/icons/hicolor/16x16/apps/quick-settings.png",
+      "repo": "home/.local/share/icons/hicolor/16x16/apps/quick-settings.png"
     }
   ]
 }
