@@ -1,17 +1,19 @@
 
-# alice's niri dots
+# A clean setup for the best Window Manager :3 
 
-my personal Niri desktop rice for Arch Linux :3
+A niri setup with all you will need. 
 
-this repository contains my Niri configuration, Quickshell shell, themes, Wallfliper setup, local scripts, wallpapers, and the supporting packages needed to run the desktop.
+Here is an installer script for my dotfiles, and the dotfiles themselves. 
 
 the installer is designed to be usable both from a local git clone and directly from GitHub.
+
+Only arch support for now (debian support is in installer but VERY experimental
 
 ---
 
 ## quick install
 
-the easiest way to install the rice is:
+the easiest way to install the dots is:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AliceTheDotfile/niri-dots-clean/main/install.sh | bash
@@ -24,7 +26,8 @@ the installer will:
 3. install the requested configuration and packages
 4. clean up the temporary repository when it exits
 
-nothing needs to be cloned into your home directory.
+nothing needs to be cloned into your home directory. 
+(if you dont want i wont send the cops or anything)
 
 ---
 
@@ -219,7 +222,7 @@ the downloaded repository is removed automatically when the installer exits.
 ./install.sh --configs-only
 ```
 
-installs the rice without installing packages.
+installs the dots without installing packages.
 
 ---
 
