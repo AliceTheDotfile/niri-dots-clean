@@ -1,78 +1,43 @@
 #!/usr/bin/env bash
 #
-# Alice's Niri dots - single-file installer :3
+# niri-dots-clean installer
 #
-# Everything lives in this file. It contains the Python installer directly,
-# so both of these work:
+#   local:   ./install.sh
+#   remote:  curl -fsSL https://raw.githubusercontent.com/AliceTheDotfile/niri-dots-clean/main/install.sh | bash
 #
-# Local:
-#   ./install.sh
-#
-# Remote:
-#   curl -fsSL https://raw.githubusercontent.com/AliceTheDotfile/niri-dots-clean/main/install.sh | bash
-#
+# Supports Arch-based and Debian-based systems. Run with --help for options.
 
 set -Eeuo pipefail
 
-SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
-SCRIPT_DIR=""
-
-if [[ -n "$SCRIPT_SOURCE" ]]; then
-    SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_SOURCE")" 2>/dev/null && pwd -P)" || true
+# Running from a checkout: work from the repository root.
+src="${BASH_SOURCE[0]:-}"
+if [[ -n $src && -f $src ]]; then
+    dir="$(cd -- "$(dirname -- "$src")" && pwd -P)"
+    [[ -d $dir/niri ]] && cd -- "$dir"
 fi
 
-# When this is a real local install.sh, make the repository discoverable by
-# running the embedded installer from the repository directory.
-if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install.sh" && -d "$SCRIPT_DIR/niri" ]]; then
-    cd -- "$SCRIPT_DIR"
-fi
-
-# The Python installer is embedded below. Keep Bash's stdin alone because
-# it may be the curl pipe containing this script. Give Python a separate
-# terminal fd instead, so the interactive menu can still read keystrokes.
-if [[ ! -t 0 && -r /dev/tty ]]; then
+# When piped from curl, stdin is the script itself. Hand Python the terminal
+# instead so prompts still work.
+if [[ ! -t 0 ]] && (: </dev/tty) 2>/dev/null; then
     exec 4</dev/tty
 else
     exec 4<&0
 fi
 
-command -v python3 >/dev/null 2>&1 || {
-    if command -v sudo >/dev/null 2>&1 && command -v pacman >/dev/null 2>&1; then
-        printf '\033[38;5;205m::\033[0m Python 3 is required; installing it...\n'
-        sudo pacman -Syu --needed --noconfirm python
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 not found, installing it..." >&2
+    if command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --needed python
+    elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update && sudo apt-get install -y python3
     else
-        printf 'error: python3 is required, and pacman/sudo are unavailable\n' >&2
+        echo "error: python3 is required" >&2
         exit 1
     fi
-}
-
-if ! command -v python3 >/dev/null 2>&1; then
-    printf 'error: python3 is still unavailable after bootstrap\n' >&2
-    exit 1
 fi
 
-python3 /dev/fd/3 "$@" </dev/fd/4 3<<'PYTHON'
-"""
-Alice's Niri dotfiles installer :3
-
-Python/stdlib-only installer for Arch Linux.
-
-The repository is a baseline rice. A fresh install copies the complete
-baseline. Existing-system updates are different: they use
-.alice-sync/update-manifest.json to decide exactly which files are allowed to
-change.
-
-Fresh install:
-  repository -> complete baseline rice
-
-Future update:
-  git/archive -> update manifest -> only explicitly shared files
-
-Never managed:
-  ~/.config/waybar
-  ~/.config/fastfetch
-  Kate session files such as ~/.local/share/kate/anonymous.katesession
-"""
+exec python3 /dev/fd/3 "$@" <&4 3<<'PYTHON'
+"""niri-dots-clean installer (Python standard library only)."""
 
 from __future__ import annotations
 
@@ -81,2141 +46,892 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Iterable
-from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
-VERSION = "2.2.0"
-REPO_URL = "https://github.com/AliceTheDotfile/niri-dots-clean"
+NAME = "niri-dots-clean"
+VERSION = "3.0.0"
 ARCHIVE_URL = (
-    "https://codeload.github.com/AliceTheDotfile/"
-    "niri-dots-clean/tar.gz/refs/heads/main"
+    "https://codeload.github.com/AliceTheDotfile/niri-dots-clean/"
+    "tar.gz/refs/heads/main"
 )
 
 HOME = Path.home()
-CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
-SHARE = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
+SHARE = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share")
 BIN = HOME / ".local/bin"
 
-BACKUP_ROOT = HOME / ".dotfiles-backup"
-CACHE_ROOT = HOME / ".cache/alice-niri-dots"
-TIMESTAMP = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-BACKUP = BACKUP_ROOT / TIMESTAMP
-LOG_FILE = CACHE_ROOT / f"install-{TIMESTAMP}.log"
+STAMP = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+BACKUP = HOME / ".dotfiles-backup" / STAMP
+CACHE = HOME / ".cache" / NAME
+LOG_PATH = CACHE / f"install-{STAMP}.log"
 
-UPDATE_MANIFEST_REL = ".alice-sync/update-manifest.json"
+MANIFEST = ".alice-sync/update-manifest.json"
+HOME_TOKEN = b"@HOME@"
 
-RESET = "\033[0m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-PINK = "\033[38;5;205m"
-PURPLE = "\033[38;5;141m"
-CYAN = "\033[38;5;81m"
-GREEN = "\033[38;5;114m"
-YELLOW = "\033[38;5;221m"
-RED = "\033[38;5;203m"
-WHITE = "\033[97m"
-GRAY = "\033[90m"
+# --------------------------------------------------------------------------
+# Packages
+#
+# One token per package:  arch-name[:debian-name]
+#   - no ":"          same name on both
+#   - ":-"            not packaged on Debian
+#   - "-:name"        Debian only
+#   - "a|b"           first available alternative
+#   - "a,b"           install every one of these
+# --------------------------------------------------------------------------
 
+PYSIDE = ",".join(
+    "python3-pyside6." + m for m in ("qtcore", "qtgui", "qtwidgets", "qtqml", "qtquick")
+)
 
-CORE_PKGS = [
-    "niri",
-    "xwayland-satellite",
-    "quickshell",
-    "kitty",
-    "swaync",
-    "wofi",
-    "kate",
-    "qt6ct",
-    "nwg-look",
-    "kvantum",
-    "layer-shell-qt",
-    "papirus-icon-theme",
-    "dconf",
-    "awww",
-    "mpv",
-    "ffmpeg",
-    "pyside6",
-    "pipewire",
-    "pipewire-pulse",
-    "wireplumber",
-    "playerctl",
-    "pavucontrol",
-    "brightnessctl",
-    "grim",
-    "slurp",
-    "wl-clipboard",
-    "xdg-utils",
-    "xdg-user-dirs",
-    "xdg-desktop-portal",
-    "xdg-desktop-portal-gtk",
-    "networkmanager",
-    "network-manager-applet",
-    "bluez",
-    "bluez-utils",
-    "blueman",
-    "python",
-    "jq",
-    "rsync",
-    "git",
-    "ttf-hack",
-    "noto-fonts",
-    "noto-fonts-emoji",
-    "otf-atkinsonhyperlegiblemono-nerd",
-    "woff2-font-awesome",
-]
+CORE = f"""
+niri xwayland-satellite quickshell kitty swaync:sway-notification-center wofi
+kate qt6ct nwg-look kvantum:qt6-style-kvantum layer-shell-qt papirus-icon-theme
+dconf:dconf-cli awww mpv ffmpeg pyside6:{PYSIDE}
+pipewire pipewire-pulse wireplumber playerctl pavucontrol brightnessctl
+grim slurp wl-clipboard xdg-utils xdg-user-dirs xdg-desktop-portal
+xdg-desktop-portal-gtk networkmanager:network-manager
+network-manager-applet:network-manager-gnome bluez bluez-utils:- blueman
+python:python3 jq rsync git ttf-hack:fonts-hack noto-fonts:fonts-noto-core
+noto-fonts-emoji:fonts-noto-color-emoji otf-atkinsonhyperlegiblemono-nerd:-
+woff2-font-awesome:fonts-font-awesome
+"""
 
-NICE_PKGS = [
-    "firefox",
-    "thunar",
-    "file-roller",
-    "7zip",
-    "unzip",
-    "zip",
-    "imv",
-    "neovim",
-    "fzf",
-    "ripgrep",
-    "fd",
-    "bat",
-    "eza",
-    "tree",
-    "less",
-    "fastfetch",
-    "man-db",
-    "man-pages",
-]
+EXTRA = """
+firefox:firefox-esr|firefox thunar file-roller 7zip:7zip|p7zip-full unzip zip
+imv neovim fzf ripgrep fd:fd-find bat eza tree less fastfetch man-db
+man-pages:manpages
+"""
 
-FRESH_PKGS = [
-    "greetd",
-    "greetd-tuigreet",
-]
+FRESH = "greetd greetd-tuigreet:tuigreet"
 
-AUR_PKGS = [
-    "mpvpaper",
-    "neowall-bin",
-]
+AUR = ["mpvpaper"]  # Arch only
 
 CONFIG_DIRS = [
-    "alice-rice",
-    "btop",
-    "cava",
-    "environment.d",
-    "fontconfig",
-    "gamearch",
-    "gtk-3.0",
-    "gtk-4.0",
-    "Kvantum",
-    "niri",
-    "qt6ct",
-    "swaync",
+    "alice-rice", "btop", "cava", "environment.d", "fontconfig", "gamearch",
+    "gtk-3.0", "gtk-4.0", "Kvantum", "niri", "qt6ct", "swaync",
 ]
 
 HOME_ITEMS = [
-    ".bashrc",
-    ".bash_profile",
-    ".config/kdeglobals",
-    ".config/kate",
-    ".config/katerc",
-    ".config/katevirc",
-    ".config/katemetainfos",
+    ".bashrc", ".bash_profile", ".config/kdeglobals", ".config/kate",
+    ".config/katerc", ".config/katevirc", ".config/katemetainfos",
     ".local/share/color-schemes/AliceNight.colors",
-    ".local/share/themes/AliceNight",
-    ".icons/Bibata-Material-Cloud",
+    ".local/share/themes/AliceNight", ".icons/Bibata-Material-Cloud",
 ]
 
-REQUIRED_REPO_PATHS = [
-    "niri",
-    "quickshell/my-shell",
-    "wallfliper",
-    "local/bin",
-    "Wallpapers",
-]
+REQUIRED = ["niri", "quickshell/my-shell", "wallfliper", "local/bin", "Wallpapers"]
 
-OPTIONAL_REPO_PATHS = [
-    "home/.config/kate",
-    "home/.config/katerc",
-    "home/.config/katevirc",
-    "home/.config/katemetainfos",
-]
+VERIFY = ["niri", "quickshell", "kitty", "kate", "awww", "mpv", "ffmpeg"]
 
 
-class InstallerError(RuntimeError):
-    """Expected installer failure."""
+class Fail(RuntimeError):
+    """Expected, user-facing failure."""
 
 
-class Logger:
-    def __init__(self, path: Path, color: bool = True) -> None:
-        self.path = path
-        self.color = color
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fp = self.path.open("a", encoding="utf-8")
+# --------------------------------------------------------------------------
+# Output
+# --------------------------------------------------------------------------
 
-    def close(self) -> None:
-        try:
-            self._fp.close()
-        except Exception:
-            pass
-
-    def _clean(self, text: str) -> str:
-        return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
-
-    def write(self, text: str = "") -> None:
-        print(text)
-        self._fp.write(self._clean(text) + "\n")
-        self._fp.flush()
-
-    def raw(self, text: str = "") -> None:
-        print(text, end="")
-        self._fp.write(self._clean(text))
-        self._fp.flush()
-
-    def command(self, argv: list[str]) -> None:
-        rendered = " ".join(shell_quote(part) for part in argv)
-        self._fp.write(f"$ {rendered}\n")
-        self._fp.flush()
+COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_log = None
 
 
-def shell_quote(value: str) -> str:
-    return "'" + value.replace("'", "'\"'\"'") + "'"
+def paint(code: str, text: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if COLOR else text
+
+
+def out(text: str = "") -> None:
+    global _log
+    print(text, flush=True)
+    try:
+        if _log is None:
+            CACHE.mkdir(parents=True, exist_ok=True)
+            _log = LOG_PATH.open("a", encoding="utf-8")
+        _log.write(_ANSI.sub("", text) + "\n")
+        _log.flush()
+    except OSError:
+        pass
+
+
+def head(text: str) -> None:
+    out()
+    out(paint("1", f"==> {text}"))
+
+
+def ok(text: str) -> None:
+    out(f"  {paint('32', 'ok')}    {text}")
+
+
+def info(text: str) -> None:
+    out(f"        {text}")
+
+
+def warn(text: str) -> None:
+    out(f"  {paint('33', 'warn')}  {text}")
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+
+def have(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+
+def lexists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def query(argv: list[str]) -> str:
+    """Run a read-only command and return stdout ('' on any failure)."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, check=False)
+    except OSError:
+        return ""
+    return r.stdout
+
+
+def sub_home(path: Path) -> None:
+    """Replace the @HOME@ token in a small text file."""
+    try:
+        if path.is_symlink() or path.stat().st_size > 4_000_000:
+            return
+        data = path.read_bytes()
+    except OSError:
+        return
+    if HOME_TOKEN in data:
+        path.write_bytes(data.replace(HOME_TOKEN, str(HOME).encode()))
+
+
+def copy_file(src, dst, *, follow_symlinks=True):
+    shutil.copy2(src, dst, follow_symlinks=False)
+    sub_home(Path(dst))
+    return dst
+
+
+def detect_distro() -> tuple[str, str]:
+    """Return (family, pretty name). Family is 'arch', 'debian' or ''."""
+    info_map: dict[str, str] = {}
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            key, _, val = line.partition("=")
+            info_map[key] = val.strip().strip('"')
+    except OSError:
+        pass
+    ids = {info_map.get("ID", "")} | set(info_map.get("ID_LIKE", "").split())
+    pretty = info_map.get("PRETTY_NAME", "Linux")
+    if ids & {"arch", "archlinux"} and have("pacman"):
+        return "arch", pretty
+    if ids & {"debian", "ubuntu"} and have("apt-get"):
+        return "debian", pretty
+    if have("pacman"):
+        return "arch", pretty
+    if have("apt-get"):
+        return "debian", pretty
+    return "", pretty
+
+
+def parse_specs(text: str) -> list[tuple[str, str]]:
+    specs = []
+    for token in text.split():
+        arch, sep, deb = token.partition(":")
+        specs.append((arch, deb if sep else arch))
+    return specs
+
+
+# --------------------------------------------------------------------------
+# Installer
+# --------------------------------------------------------------------------
 
 
 class Installer:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.dotfiles: Path | None = None
-        self.bootstrap_dir: Path | None = None
-        self.logger = Logger(
-            LOG_FILE,
-            color=(not args.no_color and sys.stdout.isatty()),
-        )
-        self.step_no = 0
-        self.total_steps = 0
-        self.summary: list[str] = []
-        self.changed = False
-        self.backup_created = False
+        self.dry = args.dry_run
+        self.family, self.distro_name = detect_distro()
+        self.repo: Path | None = None
+        self.tmp: Path | None = None
+        self.sudo_ready = False
+        self.backed_up = False
+        self.unavailable: list[str] = []
+        self.fresh = args.mode == "fresh"
+        self.minimal = args.mode == "minimal" or args.minimal
 
-    # --------------------------------------------------------
-    # Output
-    # --------------------------------------------------------
+    # ---- plumbing --------------------------------------------------------
 
-    def paint(self, color: str, text: str) -> str:
-        if self.logger.color:
-            return f"{color}{text}{RESET}"
-        return text
-
-    def say(self, message: str) -> None:
-        self.logger.write(f"{self.paint(PINK, '::')} {message}")
-
-    def info(self, message: str) -> None:
-        self.logger.write(f"{self.paint(CYAN, '→')} {message}")
-
-    def success(self, message: str) -> None:
-        self.logger.write(f"{self.paint(GREEN, '✓')} {message}")
-
-    def warn(self, message: str) -> None:
-        self.logger.write(f"{self.paint(YELLOW, '!')} {message}")
-
-    def fail(self, message: str) -> None:
-        self.logger.write(f"{self.paint(RED, '✗')} {message}")
-
-    def step(self, message: str) -> None:
-        self.step_no += 1
-        prefix = f"[{self.step_no}/{self.total_steps}]"
-        self.logger.write(f"{self.paint(PURPLE, prefix)} {message}")
-
-    def clear(self) -> None:
-        if sys.stdout.isatty():
-            print("\033[2J\033[H", end="")
-
-    # --------------------------------------------------------
-    # Lifecycle
-    # --------------------------------------------------------
-
-    def cleanup(self) -> None:
-        if self.bootstrap_dir and self.bootstrap_dir.exists():
-            shutil.rmtree(self.bootstrap_dir, ignore_errors=True)
-        self.logger.close()
-
-    def fail_gracefully(self, exc: BaseException) -> int:
-        if isinstance(exc, KeyboardInterrupt):
-            self.fail("installation cancelled")
-            return 130
-        self.fail(str(exc))
-        self.info(f"log saved to {LOG_FILE}")
-        if self.backup_created:
-            self.info(f"backup saved to {BACKUP}")
-        return 1
-
-    # --------------------------------------------------------
-    # Basic checks
-    # --------------------------------------------------------
-
-    @staticmethod
-    def command_exists(name: str) -> bool:
-        return shutil.which(name) is not None
-
-    def require_arch(self) -> None:
-        if not self.command_exists("pacman"):
-            raise InstallerError(
-                "this installer requires Arch Linux or another "
-                "Arch-based system with pacman"
-            )
-        if os.geteuid() == 0:
-            raise InstallerError("do not run this installer as root")
-        if not self.command_exists("sudo"):
-            raise InstallerError("sudo is required by this installer")
-
-    def ensure_sudo(self) -> None:
-        if self.args.dry_run:
-            return
-        self.say("checking sudo access")
-        result = subprocess.run(
-            ["sudo", "-v"],
-            stdin=sys.stdin,
-            stdout=None,
-            stderr=None,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise InstallerError("sudo authentication failed")
-
-    # --------------------------------------------------------
-    # Repository
-    # --------------------------------------------------------
-
-    def repo_complete(self, path: Path | None) -> bool:
-        if path is None:
-            return False
-        required = [path / item for item in REQUIRED_REPO_PATHS]
-        return all(item.exists() for item in required)
-
-    def discover_local_repo(self) -> Path | None:
-        candidates: list[Path] = []
-        cwd = Path.cwd().resolve()
-        candidates.append(cwd)
-
-        script_value = globals().get("__file__")
-        if script_value and not str(script_value).startswith("<"):
-            try:
-                candidates.append(Path(script_value).resolve().parent)
-            except Exception:
-                pass
-
-        seen: set[Path] = set()
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            if self.repo_complete(candidate):
-                return candidate
-        return None
-
-    def _safe_extract_tar(
-        self,
-        archive: tarfile.TarFile,
-        destination: Path,
-    ) -> None:
-        destination = destination.resolve()
-        for member in archive.getmembers():
-            target = (destination / member.name).resolve()
-            try:
-                target.relative_to(destination)
-            except ValueError:
-                raise InstallerError(
-                    f"refusing unsafe archive path: {member.name}"
-                )
-        for member in archive.getmembers():
-            archive.extract(member, path=destination)
-
-    def download_repo(self) -> Path:
-        self.say("downloading latest Alice Niri dots from GitHub")
-        self.bootstrap_dir = Path(
-            tempfile.mkdtemp(prefix="alice-niri-dots-")
-        )
-        archive_path = self.bootstrap_dir / "repo.tar.gz"
-
-        request = Request(
-            ARCHIVE_URL,
-            headers={
-                "User-Agent": f"Alice-Niri-Dots-Installer/{VERSION}",
-                "Accept": "application/vnd.github+json",
-            },
-        )
-
-        try:
-            with urlopen(request, timeout=60) as response:
-                with archive_path.open("wb") as fp:
-                    while True:
-                        chunk = response.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        fp.write(chunk)
-        except (OSError, URLError) as exc:
-            raise InstallerError(
-                f"could not download the dotfiles repository: {exc}"
-            ) from exc
-
-        self.say("extracting repository")
-        extract_root = self.bootstrap_dir / "extract"
-        extract_root.mkdir()
-
-        try:
-            with tarfile.open(archive_path, "r:gz") as archive:
-                self._safe_extract_tar(archive, extract_root)
-        except (OSError, tarfile.TarError) as exc:
-            raise InstallerError(
-                f"could not extract the dotfiles archive: {exc}"
-            ) from exc
-
-        roots = [p for p in extract_root.iterdir() if p.is_dir()]
-        repo = roots[0] if len(roots) == 1 else extract_root
-
-        if not self.repo_complete(repo):
-            raise InstallerError(
-                "downloaded repository is missing required files"
-            )
-
-        archive_path.unlink(missing_ok=True)
-        self.success("latest dotfiles downloaded")
-        return repo
-
-    def bootstrap_repo(self) -> None:
-        local = self.discover_local_repo()
-        if local is not None:
-            self.dotfiles = local
-            self.info(f"repository: {local}")
-            return
-
-        self.dotfiles = self.download_repo()
-        self.info(f"temporary repository: {self.dotfiles}")
-
-    def validate_repo(self) -> None:
-        assert self.dotfiles is not None
-        self.step("checking repository")
-
-        missing = []
-        for rel in REQUIRED_REPO_PATHS:
-            if not (self.dotfiles / rel).exists():
-                missing.append(rel)
-
-        for rel in OPTIONAL_REPO_PATHS:
-            if not (self.dotfiles / rel).exists():
-                self.warn(f"optional Kate config not present: {rel}")
-
-        if missing:
-            raise InstallerError(
-                "repository is missing required paths: "
-                + ", ".join(missing)
-            )
-
-        self.success("repository looks good")
-
-    def update_repo(self) -> None:
-        assert self.dotfiles is not None
-        git_dir = self.dotfiles / ".git"
-
-        if not git_dir.is_dir():
-            self.say("using latest GitHub snapshot")
-            self.success("dotfiles are already at the latest downloaded revision")
-            return
-
-        if not self.command_exists("git"):
-            raise InstallerError("git is required for local update mode")
-
-        self.step("checking local git repository")
-
-        result = subprocess.run(
-            ["git", "-C", str(self.dotfiles), "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise InstallerError("could not inspect git repository")
-
-        status = result.stdout.strip()
-        if status:
-            self.fail("the dotfiles repository has uncommitted changes")
-            self.logger.write()
-            self.logger.write(status)
-            raise InstallerError(
-                "update stopped so your local repository changes "
-                "are not overwritten"
-            )
-
-        branch = subprocess.run(
-            ["git", "-C", str(self.dotfiles), "branch", "--show-current"],
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip()
-
-        if branch:
-            self.info(f"branch: {branch}")
-        else:
-            self.warn("repository is in detached HEAD state")
-
-        if self.args.dry_run:
-            self.info("[dry] would run git pull --ff-only")
-            return
-
-        self.say("pulling latest dotfiles")
-        self.run_cmd(
-            [
-                "git",
-                "-C",
-                str(self.dotfiles),
-                "-c",
-                "core.hooksPath=/dev/null",
-                "pull",
-                "--ff-only",
-            ]
-        )
-        self.success("dotfiles repository updated")
-
-    # --------------------------------------------------------
-    # Command execution
-    # --------------------------------------------------------
-
-    def run_cmd(
-        self,
-        argv: list[str],
-        *,
-        sudo: bool = False,
-        cwd: Path | None = None,
-        check: bool = True,
-        capture: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        command = list(argv)
+    def run(self, argv: list[str], *, sudo: bool = False, cwd: Path | None = None) -> None:
+        """Run a command that changes the system (honours --dry-run)."""
         if sudo:
-            command.insert(0, "sudo")
+            if not have("sudo"):
+                raise Fail("sudo is required")
+            argv = ["sudo", *argv]
+        rendered = " ".join(shlex.quote(a) for a in argv)
+        if self.dry:
+            info(f"[dry-run] {rendered}")
+            return
+        if sudo and not self.sudo_ready:
+            if subprocess.run(["sudo", "-v"]).returncode != 0:
+                raise Fail("sudo authentication failed")
+            self.sudo_ready = True
+        if _log:
+            _log.write(f"$ {rendered}\n")
+        if subprocess.run(argv, cwd=cwd).returncode != 0:
+            raise Fail(f"command failed: {rendered}")
 
-        self.logger.command(command)
-
-        if self.args.dry_run:
-            rendered = " ".join(shell_quote(x) for x in command)
-            self.info(f"[dry] {rendered}")
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout="" if capture else None,
-                stderr="" if capture else None,
-            )
-
-        result = subprocess.run(
-            command,
-            cwd=str(cwd) if cwd else None,
-            text=True,
-            capture_output=capture,
-            check=False,
-        )
-
-        if check and result.returncode != 0:
-            if capture and result.stderr:
-                self.logger.write(result.stderr.rstrip())
-            raise InstallerError(
-                f"command failed ({result.returncode}): "
-                + " ".join(command)
-            )
-        return result
-
-    # --------------------------------------------------------
-    # Interactive helpers
-    # --------------------------------------------------------
-
-    def ask(self, prompt: str, *, default: bool = True) -> bool:
+    def ask(self, prompt: str, default: bool = True) -> bool:
         if self.args.assume_yes:
             return True
-        if self.args.assume_no:
-            return False
         if not sys.stdin.isatty():
             return default
-
-        suffix = "[Y/n]" if default else "[y/N]"
         try:
-            answer = input(f"{prompt} {suffix} ").strip().lower()
+            answer = input(f"{prompt} [{'Y/n' if default else 'y/N'}] ").strip().lower()
         except EOFError:
             return default
+        return default if not answer else answer in ("y", "yes")
 
-        if not answer:
-            return default
-        return answer in {"y", "yes"}
-
-    # --------------------------------------------------------
-    # Package handling
-    # --------------------------------------------------------
-
-    def pacman_package_exists(self, package: str) -> bool:
-        result = subprocess.run(
-            ["pacman", "-Si", package],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        return result.returncode == 0
-
-    def install_official_packages(self, packages: Iterable[str]) -> None:
-        package_list = list(dict.fromkeys(packages))
-        valid = []
-        missing = []
-
-        for package in package_list:
-            if self.pacman_package_exists(package):
-                valid.append(package)
-            else:
-                missing.append(package)
-
-        for package in missing:
-            self.warn(f"not found in Arch repositories: {package}")
-
-        if not valid:
-            return
-
-        self.step(f"installing {len(valid)} official packages")
-        self.run_cmd(
-            ["pacman", "-Syu", "--needed", "--noconfirm", *valid],
-            sudo=True,
-        )
-        self.success("official packages installed")
-
-    def aur_helper(self) -> str | None:
-        for name in ("yay", "paru"):
-            if self.command_exists(name):
-                return name
-        return None
-
-    def install_yay(self) -> str:
-        if self.command_exists("yay"):
-            return "yay"
-
-        self.step("bootstrapping yay")
-        self.install_official_packages(["base-devel", "git"])
-
-        temp = Path(tempfile.mkdtemp(prefix="alice-yay-"))
-        try:
-            self.run_cmd(
-                [
-                    "git",
-                    "clone",
-                    "https://aur.archlinux.org/yay.git",
-                    str(temp / "yay"),
-                ]
-            )
-            self.run_cmd(
-                ["makepkg", "-si", "--noconfirm"],
-                cwd=temp / "yay",
-            )
-        finally:
-            shutil.rmtree(temp, ignore_errors=True)
-
-        if not self.command_exists("yay"):
-            raise InstallerError("yay installation did not produce a yay command")
-
-        self.success("yay installed")
-        return "yay"
-
-    def install_aur_packages(self, packages: Iterable[str]) -> None:
-        package_list = list(dict.fromkeys(packages))
-        if not package_list:
-            return
-
-        helper = self.aur_helper()
-        if helper is None:
-            self.warn("no AUR helper found")
-            if self.args.dry_run:
-                self.info("[dry] would offer to install yay")
-                return
-            if self.args.assume_no:
-                self.warn("AUR packages skipped")
-                return
-            if self.ask("install yay automatically?", default=True):
-                helper = self.install_yay()
-            else:
-                self.warn("AUR packages skipped")
-                return
-
-        self.step(f"installing {len(package_list)} AUR packages with {helper}")
-        self.run_cmd([
-            helper,
-            "-S",
-            "--needed",
-            "--noconfirm",
-            *package_list,
-        ])
-        self.success("AUR packages installed")
-
-    def build_package_list(self) -> list[str]:
-        packages = list(CORE_PKGS)
-        if not self.args.minimal:
-            packages.extend(NICE_PKGS)
-        if self.args.fresh:
-            packages.extend(FRESH_PKGS)
-        return list(dict.fromkeys(packages))
-
-    def install_deps(self) -> None:
-        self.ensure_sudo()
-        self.install_official_packages(self.build_package_list())
-        self.install_aur_packages(AUR_PKGS)
-
-    # --------------------------------------------------------
-    # Files / backups
-    # --------------------------------------------------------
+    # ---- repository ------------------------------------------------------
 
     @staticmethod
-    def lexists(path: Path) -> bool:
-        return os.path.lexists(path)
+    def is_repo(path: Path) -> bool:
+        return all((path / rel).exists() for rel in REQUIRED)
 
-    def ensure_backup_root(self) -> None:
-        if not self.backup_created:
-            if self.args.dry_run:
-                self.info(f"[dry] would create backup directory {BACKUP}")
-            else:
-                BACKUP.mkdir(parents=True, exist_ok=True)
-            self.backup_created = True
-
-    def backup_destination(self, destination: Path) -> None:
-        if not self.lexists(destination):
+    def get_repo(self) -> None:
+        cwd = Path.cwd().resolve()
+        if self.is_repo(cwd):
+            self.repo = cwd
             return
 
-        self.ensure_backup_root()
-
+        head("Downloading latest dotfiles")
+        self.tmp = Path(tempfile.mkdtemp(prefix=f"{NAME}-"))
+        archive = self.tmp / "repo.tar.gz"
+        req = Request(ARCHIVE_URL, headers={"User-Agent": f"{NAME}-installer/{VERSION}"})
         try:
-            relative = destination.relative_to(HOME)
-        except ValueError:
-            relative = Path("outside-home") / destination.as_posix().lstrip("/")
+            with urlopen(req, timeout=60) as resp, archive.open("wb") as fp:
+                shutil.copyfileobj(resp, fp, 1 << 20)
+            dest = self.tmp / "src"
+            dest.mkdir()
+            with tarfile.open(archive, "r:gz") as tar:
+                if hasattr(tarfile, "data_filter"):
+                    tar.extractall(dest, filter="data")
+                else:
+                    root = dest.resolve()
+                    for m in tar.getmembers():
+                        if not (root / m.name).resolve().is_relative_to(root):
+                            raise Fail(f"unsafe path in archive: {m.name}")
+                    tar.extractall(dest)
+        except (OSError, tarfile.TarError) as exc:
+            raise Fail(f"could not download the repository: {exc}") from exc
+        archive.unlink(missing_ok=True)
 
-        target = BACKUP / relative
+        roots = [p for p in dest.iterdir() if p.is_dir()]
+        self.repo = roots[0] if len(roots) == 1 else dest
+        ok("downloaded")
 
-        if self.args.dry_run:
-            self.info(f"[dry] would move {destination} -> {target}")
+    def check_repo(self) -> None:
+        assert self.repo
+        missing = [rel for rel in REQUIRED if not (self.repo / rel).exists()]
+        if missing:
+            raise Fail("repository is missing: " + ", ".join(missing))
+
+    def git_pull(self) -> None:
+        assert self.repo
+        if not (self.repo / ".git").is_dir():
             return
+        if not have("git"):
+            raise Fail("git is required to update a local checkout")
+        head("Updating repository")
+        if query(["git", "-C", str(self.repo), "status", "--porcelain"]).strip():
+            raise Fail("the repository has uncommitted changes; commit or stash them first")
+        self.run(["git", "-C", str(self.repo), "-c", "core.hooksPath=/dev/null",
+                  "pull", "--ff-only"])
+        ok("up to date")
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(destination), str(target))
-        self.changed = True
+    # ---- packages --------------------------------------------------------
 
-    def replace_home_token(self, path: Path) -> None:
-        if self.args.dry_run or not path.exists():
-            return
+    def wanted(self) -> list[tuple[str, str]]:
+        specs = parse_specs(CORE)
+        if not self.minimal:
+            specs += parse_specs(EXTRA)
+        if self.fresh:
+            specs += parse_specs(FRESH)
+        return specs
 
-        files: list[Path] = []
-        if path.is_file():
-            files = [path]
-        elif path.is_dir():
-            for item in path.rglob("*"):
-                if item.is_file() and not item.is_symlink():
-                    files.append(item)
-
-        for item in files:
-            try:
-                data = item.read_bytes()
-            except OSError:
-                continue
-
-            marker = b"@HOME@"
-            if marker not in data:
-                continue
-
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-
-            text = text.replace("@HOME@", str(HOME))
-            item.write_text(text, encoding="utf-8")
-
-    def place(self, source: Path, destination: Path) -> None:
-        if not self.lexists(source):
-            try:
-                relative = source.relative_to(self.dotfiles) if self.dotfiles else source
-            except ValueError:
-                relative = source
-            self.warn(f"missing in repo: {relative}")
-            return
-
-        if self.lexists(destination):
-            self.say(f"backing up {destination}")
-            self.backup_destination(destination)
-
-        if self.args.dry_run:
-            if source.is_dir() and not source.is_symlink():
-                self.info(f"[dry] would copy directory {source} -> {destination}")
-            else:
-                self.info(f"[dry] would copy {source} -> {destination}")
-            return
-
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        if source.is_dir() and not source.is_symlink():
-            shutil.copytree(source, destination, symlinks=True)
+    def plan_arch(self) -> tuple[list[str], list[str]]:
+        names = list(dict.fromkeys(a for a, _ in self.wanted() if a != "-"))
+        known = set(query(["pacman", "-Slq"]).split())
+        if known:  # databases synced: drop names that do not exist
+            found = [n for n in names if n in known]
+            missing = [n for n in names if n not in known]
         else:
-            shutil.copy2(source, destination, follow_symlinks=False)
+            found, missing = names, []
+        # `pacman -T` prints only the names that are NOT installed.
+        todo = query(["pacman", "-T", *found]).split()
+        return todo, missing
 
+    def deb_state(self, names: list[str]) -> dict[str, tuple[bool, bool]]:
+        """name -> (installed, installable) from a single apt-cache call."""
+        state: dict[str, tuple[bool, bool]] = {}
+        cur, inst, cand = None, False, False
+        for line in query(["apt-cache", "policy", *names]).splitlines():
+            if line and not line.startswith(" "):
+                if cur:
+                    state[cur] = (inst, cand)
+                cur, inst, cand = line.rstrip(":").strip(), False, False
+            elif "Installed:" in line:
+                inst = "(none)" not in line
+            elif "Candidate:" in line:
+                cand = "(none)" not in line
+        if cur:
+            state[cur] = (inst, cand)
+        return state
+
+    def plan_debian(self) -> tuple[list[str], list[str]]:
+        groups: list[list[list[str]]] = []  # package -> required parts -> alternatives
+        labels: list[str] = []
+        for arch, deb in self.wanted():
+            if deb == "-":
+                labels.append(arch)
+                groups.append([])
+                continue
+            labels.append(arch if arch != "-" else deb)
+            groups.append([part.split("|") for part in deb.split(",")])
+
+        flat = sorted({alt for g in groups for part in g for alt in part})
+        state = self.deb_state(flat)
+        if not any(c for _, c in state.values()) and not self.dry:
+            self.run(["apt-get", "update"], sudo=True)  # empty package lists
+            state = self.deb_state(flat)
+
+        todo: list[str] = []
+        missing: list[str] = []
+        for label, g in zip(labels, groups):
+            if not g:
+                missing.append(label)
+                continue
+            for part in g:
+                pick = next((a for a in part if state.get(a, (False, False))[1]
+                             or state.get(a, (False, False))[0]), None)
+                if pick is None:
+                    missing.append(label)
+                elif not state[pick][0]:
+                    todo.append(pick)
+        return list(dict.fromkeys(todo)), list(dict.fromkeys(missing))
+
+    def aur_helper(self) -> str | None:
+        return next((h for h in ("yay", "paru") if have(h)), None)
+
+    def install_aur(self) -> None:
+        todo = query(["pacman", "-T", *AUR]).split()
+        if not todo or self.args.no_aur:
+            if todo:
+                self.unavailable += todo
+            return
+        helper = self.aur_helper()
+        if helper is None:
+            if not self.ask("No AUR helper found. Build yay from the AUR?"):
+                self.unavailable += todo
+                return
+            self.run(["pacman", "-S", "--needed", "base-devel", "git"], sudo=True)
+            tmp = Path(tempfile.mkdtemp(prefix="yay-"))
+            try:
+                self.run(["git", "clone", "--depth", "1",
+                          "https://aur.archlinux.org/yay.git", str(tmp / "yay")])
+                self.run(["makepkg", "-si"], cwd=tmp / "yay")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+            helper = "yay"
+        self.run([helper, "-S", "--needed", *todo])
+        ok(f"AUR: {', '.join(todo)}")
+
+    def install_packages(self) -> None:
+        if self.args.no_deps:
+            return
+        if not self.family:
+            raise Fail("unsupported system: need an Arch-based or Debian-based distro")
+        head(f"Packages ({self.family})")
+        yes = ["--noconfirm"] if self.args.assume_yes else []
+
+        if self.family == "arch":
+            todo, missing = self.plan_arch()
+            if todo:
+                info(f"installing {len(todo)} package(s)")
+                self.run(["pacman", "-Syu", "--needed", *yes, *todo], sudo=True)
+            ok(f"{len(todo)} installed, rest already present" if todo else "all present")
+            self.unavailable += missing
+            self.install_aur()
+        else:
+            todo, missing = self.plan_debian()
+            if todo:
+                info(f"installing {len(todo)} package(s)")
+                self.run(["apt-get", "install", *(["-y"] if yes else []), *todo], sudo=True)
+            ok(f"{len(todo)} installed, rest already present" if todo else "all present")
+            self.unavailable += missing + AUR
+
+    # ---- files -----------------------------------------------------------
+
+    def backup(self, dest: Path) -> None:
+        if not lexists(dest):
+            return
         try:
-            if source.is_file() and not source.is_symlink():
-                mode = stat.S_IMODE(source.stat().st_mode)
-                if mode & stat.S_IXUSR:
-                    destination.chmod(destination.stat().st_mode | stat.S_IXUSR)
+            rel = dest.relative_to(HOME)
+        except ValueError:
+            rel = Path("outside-home") / str(dest).lstrip("/")
+        if self.dry:
+            info(f"[dry-run] back up {dest}")
+            return
+        target = BACKUP / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(dest), str(target))
+        self.backed_up = True
+
+    def place(self, src: Path, dest: Path) -> bool:
+        if not lexists(src):
+            warn("not in repository: " + (str(src.relative_to(self.repo)) if self.repo else src.name))
+            return False
+        self.backup(dest)
+        if self.dry:
+            info(f"[dry-run] install {dest}")
+            return True
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir() and not src.is_symlink():
+            shutil.copytree(src, dest, symlinks=True, copy_function=copy_file)
+        else:
+            copy_file(src, dest)
+        return True
+
+    @staticmethod
+    def make_executable(path: Path) -> None:
+        try:
+            path.chmod(path.stat().st_mode | 0o111)
         except OSError:
             pass
 
-        self.replace_home_token(destination)
-        self.changed = True
-
-    # --------------------------------------------------------
-    # Manifest-based updates
-    # --------------------------------------------------------
-
-    def load_update_manifest(self) -> tuple[set[str], set[str]]:
-        """
-        Read the exact manifest written by sync.py.
-
-        sync.py writes:
-
-            {
-                "version": 1,
-                "managed": ["repo/path"],
-                "deleted": ["repo/path"]
-            }
-
-        `managed` means the file is intentionally shared and may be replaced
-        on existing systems. `deleted` means the shared baseline intentionally
-        removed that file and an update should remove it from the live system.
-
-        A missing manifest is deliberately treated as an EMPTY manifest. This
-        prevents an update on an older repository from unexpectedly replacing
-        the whole machine's configuration.
-        """
-        assert self.dotfiles is not None
-
-        path = self.dotfiles / UPDATE_MANIFEST_REL
-
-        if not path.is_file():
-            self.warn(
-                f"{UPDATE_MANIFEST_REL} is missing; existing-system update "
-                "will not overwrite any rice files"
-            )
-            self.info(
-                "run sync.py on the source machine to create the shared-file manifest"
-            )
-            return set(), set()
-
-        try:
-            data = json.loads(
-                path.read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError) as exc:
-            raise InstallerError(
-                f"could not read {UPDATE_MANIFEST_REL}: {exc}"
-            ) from exc
-
-        if not isinstance(data, dict):
-            raise InstallerError(
-                f"invalid {UPDATE_MANIFEST_REL}: expected a JSON object"
-            )
-
-        version = data.get("version")
-        if version != 1:
-            raise InstallerError(
-                f"unsupported {UPDATE_MANIFEST_REL} version: {version!r}"
-            )
-
-        managed = data.get("managed", [])
-        deleted = data.get("deleted", [])
-
-        if not isinstance(managed, list):
-            raise InstallerError(
-                f"invalid managed list in {UPDATE_MANIFEST_REL}"
-            )
-
-        if not isinstance(deleted, list):
-            raise InstallerError(
-                f"invalid deleted list in {UPDATE_MANIFEST_REL}"
-            )
-
-        def normalize(values: list[object], field: str) -> set[str]:
-            result: set[str] = set()
-
-            for value in values:
-                if not isinstance(value, str) or not value.strip():
-                    raise InstallerError(
-                        f"invalid path in {field} of {UPDATE_MANIFEST_REL}"
-                    )
-
-                raw = value.strip()
-                relative = Path(raw)
-
-                if relative.is_absolute():
-                    raise InstallerError(
-                        f"absolute path in {UPDATE_MANIFEST_REL}: {raw}"
-                    )
-
-                if "\\" in raw:
-                    raise InstallerError(
-                        f"Windows-style path in {UPDATE_MANIFEST_REL}: {raw}"
-                    )
-
-                if ".." in relative.parts:
-                    raise InstallerError(
-                        f"parent traversal in {UPDATE_MANIFEST_REL}: {raw}"
-                    )
-
-                normalized = relative.as_posix()
-
-                if normalized == "." or not normalized:
-                    raise InstallerError(
-                        f"invalid repository path in {UPDATE_MANIFEST_REL}: {raw}"
-                    )
-
-                result.add(normalized)
-
-            return result
-
-        managed_set = normalize(managed, "managed")
-        deleted_set = normalize(deleted, "deleted")
-
-        # sync.py intentionally keeps deleted paths in `managed`, but normalize
-        # older manifests that only recorded them in `deleted`.
-        managed_set |= deleted_set
-
-        return managed_set, deleted_set
-
-    def update_destination(self, relative: str) -> Path | None:
-        """
-        Map a sync.py repository-relative path to the live-system path.
-
-        This is intentionally FILE based. The sync manifest contains files,
-        not whole directories, so an update can replace one shared file without
-        replacing the rest of a machine-specific directory.
-        """
-        rel = Path(relative)
-
-        # dconf is stored as a repository file but applied through dconf load.
-        if relative == "dconf/interface.ini":
-            return None
-
-        # Wallfliper's JSON config lives under ~/.config while its program files
-        # live under ~/.local/share.
-        if relative == "wallfliper/config.json":
-            return CONFIG / "wallfliper/config.json"
-
-        if relative.startswith("wallfliper/"):
-            return SHARE / rel
-
-        if relative.startswith("local/bin/"):
-            return BIN / Path(
-                relative[len("local/bin/"):]
-            )
-
-        if relative.startswith("Wallpapers/"):
-            return HOME / Path(relative)
-
-        if relative.startswith("home/"):
-            return HOME / Path(
-                relative[len("home/"):]
-            )
-
-        if relative.startswith("quickshell/my-shell/"):
-            return CONFIG / Path(relative)
-
-        for name in CONFIG_DIRS:
-            if relative == name or relative.startswith(name + "/"):
-                return CONFIG / rel
-
-        # Deliberately do not guess where unknown paths belong.
-        return None
-
-    def manifest_file_matches_live(
-        self,
-        source: Path,
-        destination: Path,
-    ) -> bool:
-        """Compare a repository file with its live counterpart."""
-        if not self.lexists(source) or not self.lexists(destination):
-            return False
-
-        if source.is_symlink() or destination.is_symlink():
-            if not source.is_symlink() or not destination.is_symlink():
-                return False
-            try:
-                return source.readlink() == destination.readlink()
-            except OSError:
-                return False
-
-        if source.is_dir() or destination.is_dir():
-            return False
-
-        try:
-            source_data = source.read_bytes().replace(
-                b"@HOME@",
-                str(HOME).encode("utf-8"),
-            )
-            destination_data = destination.read_bytes()
-        except OSError:
-            return False
-
-        return source_data == destination_data
-
-    def remove_manifest_destination(
-        self,
-        relative: str,
-        destination: Path,
-    ) -> bool:
-        """Remove one manifest-selected file, after backing it up."""
-        if not self.lexists(destination):
-            self.info(f"already absent: {relative}")
-            return False
-
-        self.say(f"removing shared file {relative}")
-        self.backup_destination(destination)
-
-        if self.args.dry_run:
-            return True
-
-        # backup_destination moved the original out of the live location.
-        self.changed = True
-        return True
-
-    def install_manifest_updates(self) -> None:
-        """
-        Apply ONLY the files recorded by sync.py.
-
-        This function is the bridge between sync.py and install.sh:
-
-            sync.py selection
-                ↓
-            .alice-sync/update-manifest.json
-                ↓
-            installer update
-                ↓
-            exact repository files only
-
-        Nothing outside the manifest is touched here.
-        """
-        assert self.dotfiles is not None
-
-        managed, deleted = self.load_update_manifest()
-
-        if not managed:
-            self.step("checking sync.py update manifest")
-            self.warn(
-                "manifest contains no shared files; existing rice will be left alone"
-            )
-            return
-
-        self.step(
-            f"applying sync.py manifest ({len(managed)} shared file(s))"
-        )
-
-        dconf_needed = False
-        updated = 0
-        unchanged = 0
-        missing = 0
-        skipped_unknown = 0
-
-        for relative in sorted(managed):
-            source = self.dotfiles / relative
-            destination = self.update_destination(relative)
-
-            if relative in deleted:
-                if destination is None:
-                    if relative == "dconf/interface.ini":
-                        self.info(
-                            f"deleted shared dconf file: {relative}"
-                        )
-                        unchanged += 1
-                    else:
-                        self.warn(
-                            f"cannot map deleted manifest path to live system: {relative}"
-                        )
-                        skipped_unknown += 1
-                    continue
-
-                if self.remove_manifest_destination(
-                    relative,
-                    destination,
-                ):
-                    updated += 1
-                else:
-                    unchanged += 1
-                continue
-
-            if relative == "dconf/interface.ini":
-                if source.is_file():
-                    dconf_needed = True
-                else:
-                    self.warn(
-                        f"manifest lists {relative}, but it is missing from the repo"
-                    )
-                    missing += 1
-                continue
-
-            if destination is None:
-                self.warn(
-                    f"cannot map manifest path to live system: {relative}"
-                )
-                skipped_unknown += 1
-                continue
-
-            if not self.lexists(source):
-                self.warn(
-                    f"manifest lists {relative}, but the repo file is missing"
-                )
-                missing += 1
-                continue
-
-            if source.is_dir():
-                self.warn(
-                    f"manifest entry is a directory, but sync.py manages files: {relative}"
-                )
-                skipped_unknown += 1
-                continue
-
-            if self.manifest_file_matches_live(
-                source,
-                destination,
-            ):
-                self.info(
-                    f"unchanged: {relative}"
-                )
-                unchanged += 1
-                continue
-
-            self.place(
-                source,
-                destination,
-            )
-            self.info(
-                f"updated: {relative}"
-            )
-            updated += 1
-
-        if dconf_needed:
-            self.apply_dconf()
-            updated += 1
-
-        self.success(
-            "manifest update complete: "
-            f"{updated} changed, "
-            f"{unchanged} unchanged, "
-            f"{missing} missing, "
-            f"{skipped_unknown} unmapped"
-        )
-
-    # --------------------------------------------------------
-    # Config installation
-    # --------------------------------------------------------
-
     def install_configs(self) -> None:
-        assert self.dotfiles is not None
-        self.step("installing desktop configs")
+        assert self.repo
+        n = sum(self.place(self.repo / d, CONFIG / d) for d in CONFIG_DIRS)
+        n += self.place(self.repo / "quickshell/my-shell", CONFIG / "quickshell/my-shell")
+        ok(f"{n} config directories")
 
-        for name in CONFIG_DIRS:
-            self.place(
-                self.dotfiles / name,
-                CONFIG / name,
-            )
-
-        self.place(
-            self.dotfiles / "quickshell/my-shell",
-            CONFIG / "quickshell/my-shell",
-        )
-
-        self.success("desktop configs installed")
-        self.info("Fastfetch config untouched")
-        self.info("Waybar config untouched")
-
-    def install_home_files(self) -> None:
-        assert self.dotfiles is not None
-        self.step("installing shell, Kate, and theme files")
-
-        for item in HOME_ITEMS:
-            self.place(
-                self.dotfiles / "home" / item,
-                HOME / item,
-            )
-
-        self.success("shell, Kate, and theme files installed")
-        self.info("Kate session files are not installed")
-
-    # --------------------------------------------------------
-    # Wallfliper
-    # --------------------------------------------------------
+    def install_home(self) -> None:
+        assert self.repo
+        n = sum(self.place(self.repo / "home" / i, HOME / i) for i in HOME_ITEMS)
+        ok(f"{n} shell and theme files")
 
     def install_wallfliper(self) -> None:
-        assert self.dotfiles is not None
-        self.step("installing Wallfliper")
-
-        self.place(
-            self.dotfiles / "wallfliper",
-            SHARE / "wallfliper",
-        )
-
-        self.place(
-            self.dotfiles / "wallfliper/config.json",
-            CONFIG / "wallfliper/config.json",
-        )
-
-        launcher_source = self.dotfiles / "local/bin/wallfliper"
+        assert self.repo
+        self.place(self.repo / "wallfliper", SHARE / "wallfliper")
+        self.place(self.repo / "wallfliper/config.json", CONFIG / "wallfliper/config.json")
         launcher = BIN / "wallfliper"
-
-        if not launcher_source.exists():
-            if self.lexists(launcher):
-                self.say("backing up existing Wallfliper launcher")
-                self.backup_destination(launcher)
-
-            if self.args.dry_run:
-                self.info(f"[dry] would create {launcher}")
-            else:
-                BIN.mkdir(parents=True, exist_ok=True)
-                launcher.write_text(
-                    "#!/usr/bin/env bash\n"
-                    f'exec python "{SHARE / "wallfliper/main.py"}" "$@"\n',
-                    encoding="utf-8",
-                )
-                launcher.chmod(
-                    launcher.stat().st_mode | stat.S_IXUSR
-                )
-                self.changed = True
-
-        self.success("Wallfliper installed")
-
-    # --------------------------------------------------------
-    # Local scripts
-    # --------------------------------------------------------
+        if not (self.repo / "local/bin/wallfliper").exists() and not self.dry:
+            self.backup(launcher)
+            BIN.mkdir(parents=True, exist_ok=True)
+            launcher.write_text(
+                f'#!/usr/bin/env bash\nexec python3 "{SHARE / "wallfliper/main.py"}" "$@"\n'
+            )
+            self.make_executable(launcher)
+        ok("wallfliper")
 
     def install_scripts(self) -> None:
-        assert self.dotfiles is not None
-        self.step("installing scripts to ~/.local/bin")
-
-        source_dir = self.dotfiles / "local/bin"
-        if not self.args.dry_run:
-            BIN.mkdir(parents=True, exist_ok=True)
-
-        if source_dir.is_dir():
-            for source in sorted(source_dir.iterdir()):
-                if not source.is_file():
-                    continue
-
-                destination = BIN / source.name
-                self.place(source, destination)
-
-                if not self.args.dry_run:
-                    try:
-                        destination.chmod(
-                            destination.stat().st_mode
-                            | stat.S_IXUSR
-                            | stat.S_IXGRP
-                            | stat.S_IXOTH
-                        )
-                    except OSError as exc:
-                        self.warn(
-                            f"could not mark {destination.name} executable: {exc}"
-                        )
-
-        self.success("local scripts installed")
-
-    # --------------------------------------------------------
-    # Wallpapers
-    # --------------------------------------------------------
+        assert self.repo
+        n = 0
+        for src in sorted((self.repo / "local/bin").iterdir()):
+            if src.is_file():
+                dest = BIN / src.name
+                n += self.place(src, dest)
+                if not self.dry:
+                    self.make_executable(dest)
+        ok(f"{n} scripts in ~/.local/bin")
 
     def install_wallpapers(self) -> None:
-        assert self.dotfiles is not None
-        self.step("installing wallpapers")
-
-        source_dir = self.dotfiles / "Wallpapers"
-        destination_dir = HOME / "Wallpapers"
-
-        if not self.args.dry_run:
-            destination_dir.mkdir(parents=True, exist_ok=True)
-
-        if source_dir.is_dir():
-            for source in sorted(source_dir.iterdir()):
-                if not source.is_file():
-                    continue
-
-                destination = destination_dir / source.name
-
-                if self.lexists(destination):
-                    self.info(
-                        f"keeping existing wallpaper: {source.name}"
-                    )
-                    continue
-
-                if self.args.dry_run:
-                    self.info(
-                        f"[dry] would copy wallpaper: {source.name}"
-                    )
-                else:
-                    shutil.copy2(source, destination)
-                    self.changed = True
-
-        self.success("wallpapers installed")
-
-    # --------------------------------------------------------
-    # PATH
-    # --------------------------------------------------------
-
-    def path_contains_bin(self) -> bool:
-        entries = os.environ.get("PATH", "").split(os.pathsep)
-        return str(BIN) in entries
-
-    def file_mentions_bin(self, path: Path) -> bool:
-        if not path.is_file():
-            return False
-
-        try:
-            text = path.read_text(
-                encoding="utf-8",
-                errors="ignore",
-            )
-        except OSError:
-            return False
-
-        patterns = (
-            r"(^|:|\$HOME/)\.local/bin",
-            r"\.local/bin.*PATH",
-            r"PATH=.*\.local/bin",
-        )
-
-        return any(
-            re.search(pattern, text)
-            for pattern in patterns
-        )
-
-    def add_path_to_file(self, path: Path) -> None:
-        if self.file_mentions_bin(path):
-            return
-
-        if self.args.dry_run:
-            self.info(f"[dry] would add ~/.local/bin to {path}")
-            return
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        with path.open("a", encoding="utf-8") as fp:
-            fp.write(
-                "\n"
-                "# Alice dotfiles - local user scripts\n"
-                'export PATH="$HOME/.local/bin:$PATH"\n'
-            )
-
-        self.changed = True
+        assert self.repo
+        dest_dir = HOME / "Wallpapers"
+        added = 0
+        if not self.dry:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        for src in sorted((self.repo / "Wallpapers").iterdir()):
+            if src.is_file() and not lexists(dest_dir / src.name):
+                if not self.dry:
+                    shutil.copy2(src, dest_dir / src.name)
+                added += 1
+        ok(f"{added} new wallpaper(s); existing ones kept")
 
     def setup_path(self) -> None:
-        self.step("checking ~/.local/bin PATH")
-
-        if self.path_contains_bin():
-            self.success("~/.local/bin is already in PATH")
+        if str(BIN) in os.environ.get("PATH", "").split(os.pathsep):
             return
-
-        if not self.args.dry_run:
-            os.environ["PATH"] = (
-                f"{BIN}{os.pathsep}"
-                + os.environ.get("PATH", "")
-            )
-
-        for path in (
-            HOME / ".profile",
-            HOME / ".bash_profile",
-            HOME / ".bashrc",
-            HOME / ".zshrc",
-        ):
-            self.add_path_to_file(path)
-
-        self.success("~/.local/bin added to PATH")
-
-    # --------------------------------------------------------
-    # dconf
-    # --------------------------------------------------------
+        os.environ["PATH"] = f"{BIN}{os.pathsep}{os.environ.get('PATH', '')}"
+        files = [HOME / n for n in (".bashrc", ".zshrc", ".profile", ".bash_profile")]
+        targets = [f for f in files if f.is_file()] or [HOME / ".profile"]
+        line = f'\n# {NAME}\nexport PATH="$HOME/.local/bin:$PATH"\n'
+        for f in targets:
+            try:
+                if f.exists() and ".local/bin" in f.read_text(errors="ignore"):
+                    continue
+            except OSError:
+                continue
+            if self.dry:
+                info(f"[dry-run] add ~/.local/bin to {f}")
+            else:
+                with f.open("a", encoding="utf-8") as fp:
+                    fp.write(line)
+        ok("~/.local/bin added to PATH")
 
     def apply_dconf(self) -> None:
-        assert self.dotfiles is not None
-        source = self.dotfiles / "dconf/interface.ini"
-
-        if not source.is_file():
+        assert self.repo
+        src = self.repo / "dconf/interface.ini"
+        if not src.is_file() or not have("dconf") or not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
             return
-
-        if not self.command_exists("dconf"):
-            self.warn("dconf not installed; skipping GTK settings")
+        if self.dry:
+            info("[dry-run] load GTK interface settings")
             return
-
-        if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
-            self.warn("no D-Bus session bus; skipping dconf settings")
-            return
-
-        self.step("applying GTK interface settings")
-
-        if self.args.dry_run:
-            self.info("[dry] would load dconf settings")
-            return
-
-        self.ensure_backup_root()
-
-        dump = subprocess.run(
-            ["dconf", "dump", "/org/gnome/desktop/interface/"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        try:
-            (BACKUP / "interface.dconf.bak").write_text(
-                dump.stdout,
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            self.warn(f"could not save dconf backup: {exc}")
-
-        with source.open("r", encoding="utf-8") as fp:
-            result = subprocess.run(
-                ["dconf", "load", "/org/gnome/desktop/interface/"],
-                stdin=fp,
-                text=True,
-                check=False,
-            )
-
-        if result.returncode != 0:
-            self.warn("dconf load failed")
+        BACKUP.mkdir(parents=True, exist_ok=True)
+        (BACKUP / "interface.dconf").write_text(
+            query(["dconf", "dump", "/org/gnome/desktop/interface/"]))
+        self.backed_up = True
+        with src.open() as fp:
+            r = subprocess.run(["dconf", "load", "/org/gnome/desktop/interface/"], stdin=fp)
+        if r.returncode == 0:
+            ok("GTK settings")
         else:
-            self.success("GTK interface settings applied")
-
-    # --------------------------------------------------------
-    # greetd / services
-    # --------------------------------------------------------
-
-    def setup_greetd(self) -> None:
-        self.step("configuring greetd + tuigreet")
-
-        for command, label in (
-            ("greetd", "greetd"),
-            ("tuigreet", "tuigreet"),
-            ("niri-session", "niri-session"),
-        ):
-            if not self.command_exists(command):
-                raise InstallerError(f"{label} is not installed")
-
-        config_path = Path("/etc/greetd/config.toml")
-
-        if config_path.exists():
-            self.ensure_backup_root()
-            target = BACKUP / "etc/greetd/config.toml"
-
-            if self.args.dry_run:
-                self.info(
-                    f"[dry] would back up {config_path} -> {target}"
-                )
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(config_path, target)
-                self.changed = True
-
-        config = """[terminal]
-vt = 1
-
-[default_session]
-command = "tuigreet --time --remember --remember-session --asterisks --cmd niri-session"
-user = "greeter"
-"""
-
-        if self.args.dry_run:
-            self.info("[dry] would write /etc/greetd/config.toml")
-            self.info("[dry] would enable greetd.service")
-            return
-
-        temp_fd, temp_name = tempfile.mkstemp(
-            prefix="greetd-",
-            suffix=".toml",
-        )
-        os.close(temp_fd)
-        temp = Path(temp_name)
-
-        try:
-            temp.write_text(config, encoding="utf-8")
-            self.run_cmd(
-                ["install", "-d", "-m", "0755", "/etc/greetd"],
-                sudo=True,
-            )
-            self.run_cmd(
-                ["install", "-m", "0644", str(temp), str(config_path)],
-                sudo=True,
-            )
-            self.run_cmd(
-                ["systemctl", "enable", "greetd.service"],
-                sudo=True,
-            )
-        finally:
-            temp.unlink(missing_ok=True)
-
-        self.success("greetd configured")
-        self.success("tuigreet configured")
-        self.success("Niri configured as the login session")
-
-    def setup_fresh_services(self) -> None:
-        self.step("configuring fresh-system services")
-
-        if not self.command_exists("systemctl"):
-            self.warn("systemctl unavailable; cannot configure services")
-            return
-
-        for service in (
-            "NetworkManager.service",
-            "bluetooth.service",
-        ):
-            result = subprocess.run(
-                ["systemctl", "list-unit-files", service],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            if result.returncode != 0:
-                continue
-
-            self.say(f"enabling {service}")
-            self.run_cmd(
-                ["systemctl", "enable", service],
-                sudo=True,
-            )
-
-        self.setup_greetd()
-
-    # --------------------------------------------------------
-    # Verification
-    # --------------------------------------------------------
-
-    def check_command_status(self, command: str, label: str) -> None:
-        if self.command_exists(command):
-            self.success(label)
-        else:
-            self.warn(f"{label} missing")
-
-    def verify(self) -> None:
-        self.step("checking installation")
-
-        checks = [
-            ("niri", "Niri"),
-            ("niri-session", "Niri session"),
-            ("quickshell", "Quickshell"),
-            ("kitty", "Kitty"),
-            ("kate", "Kate"),
-            ("awww", "awww"),
-            ("mpv", "mpv"),
-            ("ffmpeg", "ffmpeg"),
-            ("python", "Python"),
-            ("thunar", "Thunar"),
-            ("firefox", "Firefox"),
-            ("nvim", "Neovim"),
-        ]
-
-        for command, label in checks:
-            self.check_command_status(command, label)
-
-        if self.command_exists("fastfetch"):
-            self.success("Fastfetch")
-        elif not self.args.minimal:
-            self.warn("Fastfetch missing")
-
-        if (CONFIG / "waybar").exists():
-            self.info("existing Waybar config detected and left untouched")
-
-        if (CONFIG / "fastfetch").exists():
-            self.info("existing Fastfetch config detected and left untouched")
-
-        if self.path_contains_bin():
-            self.success("~/.local/bin is in PATH")
-        else:
-            self.warn("~/.local/bin is not currently in PATH")
-
-        if self.args.fresh:
-            self.check_command_status("greetd", "greetd")
-            self.check_command_status("tuigreet", "tuigreet")
-
-            if Path("/etc/greetd/config.toml").is_file():
-                self.success("greetd configuration")
-            else:
-                self.warn("greetd configuration missing")
-
-        wallfliper = SHARE / "wallfliper/main.py"
-        if wallfliper.is_file() and self.command_exists("python"):
-            self.step("checking Wallfliper dependencies")
-
-            if self.args.dry_run:
-                self.info("[dry] would run Wallfliper dependency check")
-            else:
-                result = subprocess.run(
-                    ["python", str(wallfliper), "--check"],
-                    text=True,
-                    check=False,
-                )
-                if result.returncode == 0:
-                    self.success("Wallfliper dependency check passed")
-                else:
-                    self.warn("Wallfliper reported missing dependencies")
-
-    # --------------------------------------------------------
-    # Install flows
-    # --------------------------------------------------------
+            warn("dconf load failed")
 
     def apply_rice(self) -> None:
+        head("Configuration")
         self.install_configs()
-        self.install_home_files()
+        self.install_home()
         self.install_wallfliper()
         self.install_scripts()
         self.install_wallpapers()
         self.setup_path()
         self.apply_dconf()
 
-    def do_full_install(self) -> None:
-        self.args.fresh = False
-        self.args.minimal = False
-        self.validate_repo()
+    # ---- manifest updates ------------------------------------------------
 
-        if self.args.no_deps:
-            self.info("dependency installation disabled")
+    def load_manifest(self) -> tuple[set[str], set[str]]:
+        assert self.repo
+        path = self.repo / MANIFEST
+        if not path.is_file():
+            warn(f"{MANIFEST} not found; nothing will be overwritten")
+            return set(), set()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise Fail(f"cannot read {MANIFEST}: {exc}") from exc
+        if not isinstance(data, dict) or data.get("version") != 1:
+            raise Fail(f"unsupported {MANIFEST}")
+
+        def norm(key: str) -> set[str]:
+            values = data.get(key, [])
+            if not isinstance(values, list):
+                raise Fail(f"invalid '{key}' list in {MANIFEST}")
+            result = set()
+            for v in values:
+                p = Path(v.strip()) if isinstance(v, str) else None
+                if (p is None or not str(p).strip() or p.is_absolute() or ".." in p.parts
+                        or "\\" in v or p.as_posix() == "."):
+                    raise Fail(f"invalid path in {MANIFEST}: {v!r}")
+                result.add(p.as_posix())
+            return result
+
+        managed, deleted = norm("managed"), norm("deleted")
+        return managed | deleted, deleted
+
+    @staticmethod
+    def live_path(rel: str) -> Path | None:
+        if rel == "dconf/interface.ini":
+            return None
+        if rel == "wallfliper/config.json":
+            return CONFIG / rel
+        if rel.startswith("wallfliper/"):
+            return SHARE / rel
+        if rel.startswith("local/bin/"):
+            return BIN / rel[len("local/bin/"):]
+        if rel.startswith("Wallpapers/"):
+            return HOME / rel
+        if rel.startswith("home/"):
+            return HOME / rel[len("home/"):]
+        if rel.startswith("quickshell/my-shell/"):
+            return CONFIG / rel
+        if any(rel == d or rel.startswith(d + "/") for d in CONFIG_DIRS):
+            return CONFIG / rel
+        return None
+
+    @staticmethod
+    def same_content(src: Path, dest: Path) -> bool:
+        if not (lexists(src) and lexists(dest)) or src.is_dir() or dest.is_dir():
+            return False
+        if src.is_symlink() or dest.is_symlink():
+            return src.is_symlink() and dest.is_symlink() and os.readlink(src) == os.readlink(dest)
+        try:
+            return src.read_bytes().replace(HOME_TOKEN, str(HOME).encode()) == dest.read_bytes()
+        except OSError:
+            return False
+
+    def apply_manifest(self, managed: set[str], deleted: set[str]) -> None:
+        assert self.repo
+        head("Applying update")
+        changed = same = skipped = 0
+        dconf = False
+        for rel in sorted(managed):
+            src, dest = self.repo / rel, self.live_path(rel)
+            if rel == "dconf/interface.ini":
+                dconf = dconf or (rel not in deleted and src.is_file())
+                continue
+            if dest is None:
+                warn(f"no install location for {rel}")
+                skipped += 1
+            elif rel in deleted:
+                if lexists(dest):
+                    self.backup(dest)
+                    info(f"removed {rel}")
+                    changed += 1
+            elif not lexists(src) or src.is_dir():
+                warn(f"not a file in repository: {rel}")
+                skipped += 1
+            elif self.same_content(src, dest):
+                same += 1
+            else:
+                self.place(src, dest)
+                info(f"updated {rel}")
+                changed += 1
+        if dconf:
+            self.apply_dconf()
+            changed += 1
+        ok(f"{changed} changed, {same} unchanged, {skipped} skipped")
+
+    # ---- services / login manager ---------------------------------------
+
+    def setup_services(self) -> None:
+        head("Services")
+        if not have("systemctl"):
+            warn("systemd not found; enable NetworkManager and Bluetooth yourself")
         else:
-            self.install_deps()
+            for unit in ("NetworkManager.service", "bluetooth.service"):
+                if query(["systemctl", "list-unit-files", unit]).count(unit):
+                    self.run(["systemctl", "enable", unit], sudo=True)
+                    ok(f"enabled {unit}")
 
-        self.apply_rice()
-        self.verify()
-
-        self.summary.extend([
-            "Niri desktop installed",
-            "Kate installed and configured",
-            "Wallfliper installed",
-        ])
-
-    def do_minimal_install(self) -> None:
-        self.args.fresh = False
-        self.args.minimal = True
-        self.validate_repo()
-
-        if self.args.no_deps:
-            self.info("dependency installation disabled")
-        else:
-            self.install_deps()
-
-        self.apply_rice()
-        self.verify()
-        self.summary.append("minimal Niri setup installed")
-
-    def do_update(self) -> None:
-        self.args.fresh = False
-        self.args.minimal = False
-
-        self.say("updating existing Alice rice")
-
-        self.update_repo()
-        self.validate_repo()
-
-        managed, deleted = self.load_update_manifest()
-
-        self.logger.write()
-        self.logger.write(
-            self.paint(
-                YELLOW + BOLD,
-                "this update follows .alice-sync/update-manifest.json.",
-            )
-        )
-        self.info(
-            f"{len(managed)} shared file(s) are allowed to update"
-        )
-        if deleted:
-            self.info(
-                f"{len(deleted)} shared file(s) are marked for deletion"
-            )
-        self.info(
-            "anything not recorded by sync.py stays exactly as it is on this computer"
-        )
-        self.info(
-            "machine-specific color/settings changes are therefore preserved"
-        )
-        self.info("Waybar and Fastfetch remain untouched")
-        self.logger.write()
-
-        if not self.args.dry_run:
-            if not self.ask(
-                "apply the manifest-selected update?",
-                default=True,
-            ):
-                self.info("update cancelled before applying files")
-                return
-
-        self.install_manifest_updates()
-        self.verify()
-
-        self.summary.extend([
-            "existing rice updated from sync.py's update manifest",
-            "only explicitly shared files were changed",
-            "machine-specific omitted files were preserved",
-        ])
-
-    def do_fresh_install(self) -> None:
-        self.args.fresh = True
-        self.args.minimal = False
-        self.validate_repo()
-
-        self.logger.write()
-        self.logger.write(
-            self.paint(YELLOW + BOLD, "fresh Arch setup")
-        )
-        self.info(
-            "this mode assumes this is a mostly-empty Arch installation."
-        )
-        self.info(
-            "it will install greetd and make it the login manager."
-        )
-        self.logger.write()
-
-        if not self.args.dry_run:
-            if not self.ask(
-                "continue with fresh-system setup?",
-                default=True,
-            ):
-                self.info("fresh setup cancelled")
-                return
-
-        if self.args.no_deps:
-            self.warn(
-                "--no-deps was supplied; fresh package installation skipped"
-            )
-        else:
-            self.install_deps()
-
-        self.apply_rice()
-
-        if not self.args.no_deps:
-            self.ensure_sudo()
-            self.setup_fresh_services()
-        else:
-            self.warn(
-                "greetd setup skipped because dependency installation is disabled"
-            )
-
-        self.verify()
-
-        self.summary.extend([
-            "fresh Arch desktop installed",
-            "Niri installed",
-            "Kate installed and configured",
-            "Wallfliper installed",
-            "greetd + tuigreet configured",
-            "NetworkManager + Bluetooth configured",
-        ])
-
-        if not self.args.dry_run and not self.args.skip_reboot:
-            self.logger.write()
-            if self.ask("reboot now?", default=False):
-                self.say("rebooting")
-                self.run_cmd(["systemctl", "reboot"], sudo=True)
-
-    def do_configs_only(self) -> None:
-        self.args.fresh = False
-        self.validate_repo()
-        self.apply_rice()
-        self.verify()
-        self.summary.extend([
-            "desktop configs installed",
-            "shell / Kate / theme files installed",
-            "Wallfliper installed",
-        ])
-
-    def do_packages_only(self) -> None:
-        if self.args.no_deps:
-            self.warn("--no-deps was supplied; nothing to install")
+        if not all(have(c) for c in ("greetd", "tuigreet", "niri-session")):
+            warn("greetd, tuigreet or niri-session unavailable; login manager not configured")
+            return
+        if not have("systemctl"):
+            warn("skipping greetd (needs systemd)")
             return
 
-        self.install_deps()
-        if self.args.minimal:
-            self.summary.append("core packages installed")
-        else:
-            self.summary.append("desktop packages installed")
-
-    # --------------------------------------------------------
-    # Summary / CLI
-    # --------------------------------------------------------
-
-    def summary_screen(self) -> None:
-        self.clear()
-
-        print()
-        print(
-            " "
-            + self.paint(PINK, "╭──────────────────────────────────────────────────────╮")
+        cfg = Path("/etc/greetd/config.toml")
+        if cfg.exists() and not self.dry:
+            target = BACKUP / "etc/greetd/config.toml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(cfg, target)
+            self.backed_up = True
+        text = (
+            "[terminal]\nvt = 1\n\n[default_session]\n"
+            'command = "tuigreet --time --remember --remember-session --asterisks --cmd niri-session"\n'
+            'user = "greeter"\n'
         )
-        print(
-            " "
-            + self.paint(PINK, "│")
-            + " "
-            + self.paint(GREEN + BOLD, "installation complete")
-            + " "
-            + self.paint(DIM, ":3")
-            + "                       "
-            + self.paint(PINK, "│")
-        )
-        print(
-            " "
-            + self.paint(PINK, "╰──────────────────────────────────────────────────────╯")
-        )
-        print()
-
-        for item in self.summary:
-            self.success(item)
-
-        self.success("~/.local/bin handled")
-
-        print()
-        self.logger.write(self.paint(CYAN, "intentionally untouched:"))
-        self.logger.write("  • ~/.config/waybar")
-        self.logger.write("  • ~/.config/fastfetch")
-        self.logger.write("  • Kate session files")
-
-        if self.backup_created:
-            print()
-            self.logger.write(self.paint(CYAN, f"backup: {BACKUP}"))
-
-        print()
-        self.logger.write(self.paint(CYAN, f"log: {LOG_FILE}"))
-
-        if self.args.fresh:
-            print()
-            self.logger.write(
-                self.paint(WHITE + BOLD, "fresh-system next step:")
-            )
-            self.logger.write("  • reboot if you did not already reboot")
-            self.logger.write("  • log in through tuigreet")
-            self.logger.write("  • launch Niri")
-        elif self.args.mode == "update":
-            print()
-            self.logger.write(
-                self.paint(WHITE + BOLD, "update next step:")
-            )
-            self.logger.write("  • only sync.py-selected files were updated")
-            self.logger.write("  • restart Niri / Quickshell if needed")
-            self.logger.write("  • machine-specific omitted files were left alone")
-        elif self.args.mode == "packages":
-            print()
-            self.logger.write(
-                self.paint(WHITE + BOLD, "next step:")
-            )
-            self.logger.write("  • restart your shell if PATH changed")
-        else:
-            print()
-            self.logger.write(
-                self.paint(WHITE + BOLD, "next step:")
-            )
-            self.logger.write("  • restart Niri / Quickshell if needed")
-            self.logger.write("  • open a new shell if PATH changed")
-
-        print()
-        self.logger.write(self.paint(DIM, "have fun rice-ing :3"))
-
-    def menu(self) -> int:
-        options = [
-            "full setup       — Niri + rice + Kate + apps + AUR",
-            "update existing  — pull newest repo + manifest-selected files",
-            "fresh Arch setup — everything + greetd + tuigreet",
-            "minimal setup    — Niri + rice + Kate + core packages",
-            "configs only     — complete baseline configs without packages",
-            "packages only    — install dependencies/apps",
-            "exit",
-        ]
-
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            self.info("interactive installer needs a terminal")
-            self.info("use --no-tui for a non-interactive launch")
-            return 6
-
+        fd, tmp = tempfile.mkstemp(suffix=".toml")
+        os.close(fd)
         try:
-            import termios
-            import tty
-        except ImportError as exc:
-            raise InstallerError(
-                "terminal input support is unavailable"
-            ) from exc
-
-        selected = 0
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-
-        try:
-            tty.setcbreak(fd)
-
-            while True:
-                self.clear()
-                print()
-                print(
-                    " "
-                    + self.paint(PINK, "╭──────────────────────────────────────────────────────╮")
-                )
-                print(
-                    " "
-                    + self.paint(PINK, "│")
-                    + " "
-                    + self.paint(WHITE + BOLD, "alice's niri dots installer")
-                    + " "
-                    + self.paint(DIM, f"v{VERSION} :3")
-                    + "                    "
-                    + self.paint(PINK, "│")
-                )
-                print(
-                    " "
-                    + self.paint(PINK, "│")
-                    + " "
-                    + self.paint(GRAY, "baseline rice • manifest-aware updates")
-                    + "        "
-                    + self.paint(PINK, "│")
-                )
-                print(
-                    " "
-                    + self.paint(PINK, "╰──────────────────────────────────────────────────────╯")
-                )
-                print()
-                print(
-                    " "
-                    + self.paint(PURPLE + BOLD, "what would you like to do?")
-                )
-                print()
-
-                for index, option in enumerate(options):
-                    if index == selected:
-                        print(
-                            "   "
-                            + self.paint(PINK, "›")
-                            + " "
-                            + self.paint(WHITE + BOLD, option)
-                        )
-                    else:
-                        print(
-                            "     "
-                            + self.paint(GRAY, option)
-                        )
-
-                print()
-                print(
-                    " "
-                    + self.paint(GRAY, "↑/↓ or j/k")
-                    + "   "
-                    + self.paint(GRAY, "Enter")
-                    + " select   "
-                    + self.paint(GRAY, "q")
-                    + " quit"
-                )
-
-                key = os.read(fd, 1)
-
-                if key in (b"\n", b"\r"):
-                    return selected
-
-                if key in (b"j", b"B"):
-                    selected = (selected + 1) % len(options)
-                    continue
-
-                if key in (b"k", b"A"):
-                    selected = (selected - 1) % len(options)
-                    continue
-
-                if key in (b"q", b"Q"):
-                    return len(options) - 1
-
-                if key == b"\x1b":
-                    second = os.read(fd, 1)
-                    if second == b"[":
-                        third = os.read(fd, 1)
-                        if third == b"A":
-                            selected = (selected - 1) % len(options)
-                        elif third == b"B":
-                            selected = (selected + 1) % len(options)
+            Path(tmp).write_text(text)
+            self.run(["install", "-Dm644", tmp, str(cfg)], sudo=True)
+            self.run(["systemctl", "enable", "greetd.service"], sudo=True)
         finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            print(RESET, end="")
+            Path(tmp).unlink(missing_ok=True)
+        ok("greetd + tuigreet, session: niri")
+
+    # ---- verification ----------------------------------------------------
+
+    def verify(self) -> None:
+        head("Checking")
+        gone = [c for c in VERIFY if not have(c)]
+        if gone:
+            warn("missing commands: " + ", ".join(gone))
+        else:
+            ok("core commands present")
+        wf = SHARE / "wallfliper/main.py"
+        if wf.is_file() and have("python3") and not self.dry:
+            r = subprocess.run(["python3", str(wf), "--check"], capture_output=True, text=True)
+            if r.returncode == 0:
+                ok("wallfliper dependencies")
+            else:
+                warn("wallfliper reports missing dependencies")
+
+    def finish(self) -> None:
+        head("Done")
+        if self.unavailable:
+            warn("not available from your repositories (install manually): "
+                 + ", ".join(dict.fromkeys(self.unavailable)))
+        info("untouched: ~/.config/waybar, ~/.config/fastfetch")
+        if self.backed_up:
+            info(f"backup: {BACKUP}")
+        info(f"log: {LOG_PATH}")
+        info("restart niri and open a new shell to apply everything")
+
+    # ---- modes -----------------------------------------------------------
+
+    def full(self) -> None:
+        self.check_repo()
+        self.install_packages()
+        self.apply_rice()
+        self.verify()
+
+    def update(self) -> None:
+        self.git_pull()
+        self.check_repo()
+        managed, deleted = self.load_manifest()
+        head("Update")
+        info(f"{len(managed)} shared file(s); everything else is left as it is")
+        if not managed:
+            return
+        if not self.dry and not self.ask("Apply update?"):
+            info("cancelled")
+            return
+        self.apply_manifest(managed, deleted)
+        self.verify()
+
+    def fresh_system(self) -> None:
+        self.check_repo()
+        head("Fresh system")
+        info("installs everything and makes greetd the login manager")
+        if not self.dry and not self.ask("Continue?"):
+            info("cancelled")
+            return
+        self.install_packages()
+        self.apply_rice()
+        if not self.args.no_deps:
+            self.setup_services()
+        self.verify()
+        if not self.dry and not self.args.skip_reboot and self.ask("Reboot now?", default=False):
+            self.run(["systemctl", "reboot"], sudo=True)
 
     def execute(self) -> int:
-        try:
-            self.require_arch()
+        if os.geteuid() == 0:
+            raise Fail("do not run as root; sudo is used when needed")
+        mode = self.args.mode
+        if mode == "menu":
+            mode = self.menu()
+            if mode is None:
+                return 0
+            self.args.mode = mode
+            self.fresh = mode == "fresh"
+            self.minimal = mode == "minimal" or self.args.minimal
 
-            if self.args.mode != "packages":
-                self.bootstrap_repo()
+        out(paint("1", f"{NAME} {VERSION}") + f"  ({self.distro_name})")
+        if mode != "packages":
+            self.get_repo()
 
-            if self.args.mode == "fresh":
-                self.total_steps = 12
-            elif self.args.mode == "update":
-                self.total_steps = 8
-            elif self.args.mode == "minimal":
-                self.total_steps = 9
-            elif self.args.mode == "configs":
-                self.total_steps = 8
-            elif self.args.mode == "packages":
-                self.total_steps = 3
-            else:
-                self.total_steps = 10
+        if mode == "update":
+            self.update()
+        elif mode == "fresh":
+            self.fresh_system()
+        elif mode == "configs":
+            self.check_repo()
+            self.apply_rice()
+            self.verify()
+        elif mode == "packages":
+            self.install_packages()
+        else:
+            self.full()
+        self.finish()
+        return 0
 
-            if self.args.mode == "fresh":
-                self.do_fresh_install()
-            elif self.args.mode == "minimal":
-                self.do_minimal_install()
-            elif self.args.mode == "update":
-                self.do_update()
-            elif self.args.mode == "configs":
-                self.do_configs_only()
-            elif self.args.mode == "packages":
-                self.do_packages_only()
-            else:
-                if self.args.no_tui:
-                    self.do_full_install()
-                else:
-                    choice = self.menu()
-                    if choice == 0:
-                        self.do_full_install()
-                    elif choice == 1:
-                        self.args.mode = "update"
-                        self.do_update()
-                    elif choice == 2:
-                        self.args.mode = "fresh"
-                        self.do_fresh_install()
-                    elif choice == 3:
-                        self.args.mode = "minimal"
-                        self.do_minimal_install()
-                    elif choice == 4:
-                        self.args.mode = "configs"
-                        self.do_configs_only()
-                    elif choice == 5:
-                        self.args.mode = "packages"
-                        self.do_packages_only()
-                    else:
-                        self.clear()
-                        self.info("bye :3")
-                        return 0
+    def menu(self) -> str | None:
+        options = [
+            ("Install", "full", "packages and configs"),
+            ("Update", "update", "apply shared updates only"),
+            ("Fresh system", "fresh", "install everything and set up the login manager"),
+            ("Minimal", "minimal", "core packages and configs"),
+            ("Configs only", "configs", "no packages"),
+            ("Packages only", "packages", "no configs"),
+        ]
+        if not sys.stdin.isatty():
+            return "full"
+        out(paint("1", f"{NAME} {VERSION}") + f"  ({self.distro_name})")
+        out()
+        for i, (label, _, desc) in enumerate(options, 1):
+            out(f"  {i}) {label:<14}{desc}")
+        out("  q) Quit")
+        out()
+        while True:
+            try:
+                choice = input("Select [1]: ").strip().lower()
+            except EOFError:
+                return None
+            if choice in ("", "1"):
+                return options[0][1]
+            if choice in ("q", "quit", "exit", "0"):
+                return None
+            if choice.isdigit() and 1 <= int(choice) <= len(options):
+                return options[int(choice) - 1][1]
+            out(f"Enter a number from 1 to {len(options)}, or q.")
 
-            self.summary_screen()
-            return 0
-
-        except BaseException as exc:
-            return self.fail_gracefully(exc)
+    def cleanup(self) -> None:
+        if self.tmp:
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Alice's Niri dotfiles installer"
-    )
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="install.sh", description=f"{NAME} installer")
+    p.add_argument("--fresh", action="store_true", help="fresh system setup (adds greetd)")
+    p.add_argument("--minimal", action="store_true", help="core packages only")
+    p.add_argument("--update", dest="mode", action="store_const", const="update",
+                   help="apply shared updates from the repository")
+    p.add_argument("--configs-only", dest="mode", action="store_const", const="configs",
+                   help="install configs, skip packages")
+    p.add_argument("--packages-only", dest="mode", action="store_const", const="packages",
+                   help="install packages, skip configs")
+    p.add_argument("--no-deps", action="store_true", help="skip package installation")
+    p.add_argument("--no-aur", action="store_true", help="skip AUR packages (Arch)")
+    p.add_argument("--dry-run", action="store_true", help="show what would change")
+    p.add_argument("-y", "--yes", dest="assume_yes", action="store_true",
+                   help="answer yes to every prompt")
+    p.add_argument("--skip-reboot", action="store_true", help="never offer to reboot")
+    p.add_argument("--no-color", action="store_true", help="disable colors")
+    p.add_argument("--version", action="version", version=f"{NAME} {VERSION}")
+    args = p.parse_args()
 
-    parser.add_argument(
-        "--fresh",
-        action="store_true",
-        help="fresh Arch setup with greetd + tuigreet",
-    )
-    parser.add_argument(
-        "--minimal",
-        action="store_true",
-        help="install core Niri environment only",
-    )
-    parser.add_argument(
-        "--update",
-        dest="mode",
-        action="store_const",
-        const="update",
-        help="update from local git or latest GitHub snapshot",
-    )
-    parser.add_argument(
-        "--configs-only",
-        dest="mode",
-        action="store_const",
-        const="configs",
-        help="install the complete baseline configs without packages",
-    )
-    parser.add_argument(
-        "--packages-only",
-        dest="mode",
-        action="store_const",
-        const="packages",
-        help="install packages without configs",
-    )
-    parser.add_argument(
-        "--no-deps",
-        action="store_true",
-        help="skip package installation",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="show actions without changing the system",
-    )
-    parser.add_argument(
-        "--no-tui",
-        action="store_true",
-        help="skip the interactive menu",
-    )
-    parser.add_argument(
-        "--yes",
-        dest="assume_yes",
-        action="store_true",
-        help="answer yes to installer prompts",
-    )
-    parser.add_argument(
-        "--no",
-        dest="assume_no",
-        action="store_true",
-        help="decline optional installer prompts",
-    )
-    parser.add_argument(
-        "--skip-reboot",
-        action="store_true",
-        help="never ask to reboot after fresh setup",
-    )
-    parser.add_argument(
-        "--no-color",
-        action="store_true",
-        help="disable ANSI colors",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {VERSION}",
-    )
-
-    args = parser.parse_args()
-
-    if not hasattr(args, "mode") or args.mode is None:
-        args.mode = "menu"
-
+    global COLOR
+    if args.no_color:
+        COLOR = False
     if args.fresh:
         args.mode = "fresh"
-
-    if args.minimal and args.mode == "menu":
-        args.mode = "minimal"
-
-    if args.assume_yes and args.assume_no:
-        parser.error("--yes and --no cannot be used together")
-
+    elif args.mode is None:
+        args.mode = "minimal" if args.minimal else "menu"
     return args
 
 
 def main() -> int:
-    args = build_parser()
+    args = parse_args()
     installer = Installer(args)
 
-    def handle_signal(signum: int, _frame: object) -> None:
+    def stop(_sig, _frame):
         raise KeyboardInterrupt
 
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
 
     try:
         return installer.execute()
+    except KeyboardInterrupt:
+        out()
+        out("cancelled")
+        return 130
+    except Fail as exc:
+        out(f"{paint('31', 'error')}: {exc}")
+        out(f"log: {LOG_PATH}")
+        return 1
     finally:
         installer.cleanup()
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 PYTHON
