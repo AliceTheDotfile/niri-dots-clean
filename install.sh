@@ -5,7 +5,7 @@
 #   local:   ./install.sh
 #   remote:  curl -fsSL https://raw.githubusercontent.com/AliceTheDotfile/niri-dots-clean/main/install.sh | bash
 #
-# Supports Arch-based and Debian-based systems. Run with --help for options.
+# Supports Arch-based systems and Void Linux. Run with --help for options.
 
 set -Eeuo pipefail
 
@@ -26,10 +26,14 @@ fi
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "python3 not found, installing it..." >&2
+    if command -v sudo >/dev/null 2>&1; then priv=sudo
+    elif command -v doas >/dev/null 2>&1; then priv=doas
+    else echo "error: python3 is required (and neither sudo nor doas is available)" >&2; exit 1
+    fi
     if command -v pacman >/dev/null 2>&1; then
-        sudo pacman -S --needed python
-    elif command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update && sudo apt-get install -y python3
+        $priv pacman -S --needed python
+    elif command -v xbps-install >/dev/null 2>&1; then
+        $priv xbps-install -S python3
     else
         echo "error: python3 is required" >&2
         exit 1
@@ -43,8 +47,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import io
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -57,16 +63,21 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 NAME = "niri-dots-clean"
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 ARCHIVE_URL = (
     "https://codeload.github.com/AliceTheDotfile/niri-dots-clean/"
     "tar.gz/refs/heads/main"
+)
+NERD_FONT_URL = (
+    "https://github.com/ryanoasis/nerd-fonts/releases/latest/download/"
+    "AtkinsonHyperlegibleMono.tar.xz"
 )
 
 HOME = Path.home()
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
 SHARE = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share")
 BIN = HOME / ".local/bin"
+FONT_DIR = SHARE / "fonts/AtkinsonHyperlegibleMonoNerd"
 
 STAMP = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 BACKUP = HOME / ".dotfiles-backup" / STAMP
@@ -76,64 +87,43 @@ LOG_PATH = CACHE / f"install-{STAMP}.log"
 MANIFEST = ".alice-sync/update-manifest.json"
 HOME_TOKEN = b"@HOME@"
 
+# System locations (module-level so they are easy to see in one place).
+GREETD_CFG = Path("/etc/greetd/config.toml")
+SESSION_BIN = Path("/usr/local/bin/niri-session")
+SV_DIR = Path("/etc/sv")            # Void: available runit services
+SERVICE_DIR = Path("/var/service")  # Void: enabled runit services
+
 # --------------------------------------------------------------------------
 # Packages
 #
-# One token per package:  arch-name[:debian-name]
+# One token per package:  arch-name[:void-name]
 #   - no ":"          same name on both
-#   - ":-"            not packaged on Debian (reported as manual)
-#   - ":."            not needed on Debian (silently skipped)
-#   - "-:name"        Debian only
-#   - "a|b"           first available alternative
-#   - "a,b"           install every one of these
+#   - "name:-"        not available on Void (reported as manual)
+#   - "name:."        not needed on Void (silently skipped)
+#   - "-:name"        Void only
 # --------------------------------------------------------------------------
 
-PYSIDE = ",".join(
-    "python3-pyside6." + m for m in ("qtcore", "qtgui", "qtwidgets", "qtqml", "qtquick")
-)
-
-CORE = f"""
-niri xwayland-satellite quickshell kitty swaync:sway-notification-center wofi
-kate qt6ct nwg-look kvantum:qt6-style-kvantum layer-shell-qt papirus-icon-theme
-dconf:dconf-cli awww mpv ffmpeg pyside6:{PYSIDE}
-pipewire pipewire-pulse wireplumber playerctl pavucontrol brightnessctl
-grim slurp wl-clipboard xdg-utils xdg-user-dirs xdg-desktop-portal
-xdg-desktop-portal-gtk networkmanager:network-manager
-network-manager-applet:network-manager-gnome bluez bluez-utils:. blueman
-python:python3 jq rsync git ttf-hack:fonts-hack noto-fonts:fonts-noto-core
-noto-fonts-emoji:fonts-noto-color-emoji otf-atkinsonhyperlegiblemono-nerd:-
-woff2-font-awesome:fonts-font-awesome upower
--:dbus-user-session -:xwayland
--:qml6-module-qtquick,qml6-module-qtquick-controls,qml6-module-qtquick-layouts,qml6-module-qtquick-templates,qml6-module-qtquick-window,qml6-module-qtqml-workerscript
+CORE = """
+niri xwayland-satellite quickshell kitty swaync:SwayNotificationCenter wofi
+kate qt6ct nwg-look kvantum layer-shell-qt papirus-icon-theme dconf awww mpv
+ffmpeg pyside6:python3-pyside6 pipewire pipewire-pulse:. wireplumber playerctl
+pavucontrol brightnessctl grim slurp wl-clipboard xdg-utils xdg-user-dirs
+xdg-desktop-portal xdg-desktop-portal-gtk networkmanager:NetworkManager
+network-manager-applet bluez bluez-utils:. blueman python:python3
+python-pillow:python3-Pillow python-textual:python3-textual jq rsync git
+ttf-hack:font-hack-ttf noto-fonts:noto-fonts-ttf noto-fonts-emoji
+otf-atkinsonhyperlegiblemono-nerd:. woff2-font-awesome:font-awesome6 upower
+-:dbus -:elogind -:mesa-dri -:mpvpaper
 """
 
 EXTRA = """
-firefox:firefox-esr|firefox thunar file-roller 7zip:7zip|p7zip-full unzip zip
-imv neovim fzf ripgrep fd:fd-find bat eza tree less fastfetch man-db
-man-pages:manpages
+firefox thunar:Thunar file-roller 7zip unzip zip imv neovim fzf ripgrep fd bat
+eza tree less fastfetch man-db man-pages
 """
 
 FRESH = "greetd greetd-tuigreet:tuigreet"
 
-AUR = ["mpvpaper"]  # Arch only
-
-# Debian: tools that are not packaged are built from source (see build_*).
-BUILD_BASE = ["build-essential", "git", "pkg-config", "curl", "ca-certificates"]
-NIRI_DEPS = [
-    "clang", "libudev-dev", "libgbm-dev", "libxkbcommon-dev", "libegl1-mesa-dev",
-    "libwayland-dev", "libinput-dev", "libdbus-1-dev", "libsystemd-dev",
-    "libseat-dev", "libpipewire-0.3-dev", "libpango1.0-dev", "libdisplay-info-dev",
-]
-XWAYLAND_DEPS = ["clang", "libxcb1-dev", "libxcb-cursor-dev"]
-QUICKSHELL_DEPS = [
-    "cmake", "ninja-build", "qt6-base-dev", "qt6-base-private-dev",
-    "qt6-declarative-dev", "qt6-declarative-private-dev", "qt6-shadertools-dev",
-    "qt6-wayland-dev", "qt6-wayland-private-dev", "qt6-svg-dev", "libcli11-dev",
-    "spirv-tools", "libvulkan-dev", "libdrm-dev", "libgbm-dev", "libjemalloc-dev",
-    "libpipewire-0.3-dev", "libpam0g-dev", "libxcb1-dev", "libwayland-dev",
-    "wayland-protocols",
-]
-AWWW_DEPS = ["liblz4-dev", "libwayland-dev", "wayland-protocols", "libxkbcommon-dev", "scdoc"]
+AUR = ["mpvpaper"]  # Arch only; Void packages it directly
 
 CONFIG_DIRS = [
     "alice-rice", "btop", "cava", "environment.d", "fastfetch", "fontconfig", "gamearch",
@@ -149,7 +139,47 @@ HOME_ITEMS = [
 
 REQUIRED = ["niri", "quickshell/my-shell", "wallfliper", "local/bin", "Wallpapers"]
 
-VERIFY = ["niri", "quickshell", "kitty", "kate", "awww", "mpv", "ffmpeg"]
+VERIFY = ["niri", "niri-session", "quickshell", "kitty", "kate", "awww", "mpv", "ffmpeg"]
+
+# Void: services that clash with NetworkManager.
+NET_CLASH = ("dhcpcd", "wpa_supplicant", "dhcpcd-eth0")
+
+# Void has no systemd and its niri package ships no niri-session script, so we
+# install this launcher. It also loads ~/.config/environment.d, which systemd
+# would normally do (GTK_THEME, QT_QPA_PLATFORMTHEME, ...).
+SESSION_SCRIPT = r'''#!/bin/sh
+# Starts niri as a session on systems without systemd.
+# Installed by niri-dots-clean.
+
+[ -r /etc/profile ] && . /etc/profile
+export PATH="$HOME/.local/bin:$PATH"
+
+for f in "$HOME"/.config/environment.d/*.conf; do
+    [ -r "$f" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+        case $line in
+            ''|'#'*|';'*) continue ;;
+            [A-Za-z_]*=*) ;;
+            *) continue ;;
+        esac
+        key=${line%%=*}
+        val=${line#*=}
+        case $val in
+            \"*\") val=${val#\"}; val=${val%\"} ;;
+            \'*\') val=${val#\'}; val=${val%\'} ;;
+        esac
+        case $val in
+            *'$'*) val=$(printf '%s' "$val" | sed -e "s|\${HOME}|$HOME|g" -e "s|\$HOME|$HOME|g") ;;
+        esac
+        export "$key=$val"
+    done < "$f"
+done
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    exec dbus-run-session -- niri --session
+fi
+exec niri --session
+'''
 
 
 class Fail(RuntimeError):
@@ -203,7 +233,6 @@ def warn(text: str) -> None:
 # Helpers
 # --------------------------------------------------------------------------
 
-
 SYSPATH = os.pathsep.join(
     [os.environ.get("PATH", ""), "/usr/local/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"]
 )
@@ -217,13 +246,21 @@ def lexists(path: Path) -> bool:
     return os.path.lexists(path)
 
 
-def query(argv: list[str], env: dict | None = None) -> str:
+def query(argv: list[str]) -> str:
     """Run a read-only command and return stdout ('' on any failure)."""
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, check=False, env=env)
+        r = subprocess.run(argv, capture_output=True, text=True, check=False)
     except OSError:
         return ""
     return r.stdout
+
+
+def user_exists(name: str) -> bool:
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        return False
+    return True
 
 
 def sub_home(path: Path) -> None:
@@ -245,7 +282,7 @@ def copy_file(src, dst, *, follow_symlinks=True):
 
 
 def detect_distro() -> tuple[str, str]:
-    """Return (family, pretty name). Family is 'arch', 'debian' or ''."""
+    """Return (family, pretty name). Family is 'arch', 'void' or ''."""
     info_map: dict[str, str] = {}
     try:
         for line in Path("/etc/os-release").read_text().splitlines():
@@ -255,23 +292,30 @@ def detect_distro() -> tuple[str, str]:
         pass
     ids = {info_map.get("ID", "")} | set(info_map.get("ID_LIKE", "").split())
     pretty = info_map.get("PRETTY_NAME", "Linux")
+    if "void" in ids and have("xbps-install"):
+        return "void", pretty
     if ids & {"arch", "archlinux"} and have("pacman"):
         return "arch", pretty
-    if ids & {"debian", "ubuntu"} and have("apt-get"):
-        return "debian", pretty
+    if have("xbps-install"):
+        return "void", pretty
     if have("pacman"):
         return "arch", pretty
-    if have("apt-get"):
-        return "debian", pretty
     return "", pretty
 
 
 def parse_specs(text: str) -> list[tuple[str, str]]:
     specs = []
     for token in text.split():
-        arch, sep, deb = token.partition(":")
-        specs.append((arch, deb if sep else arch))
+        arch, sep, void = token.partition(":")
+        specs.append((arch, void if sep else arch))
     return specs
+
+
+def priv_cmd() -> list[str]:
+    for tool in ("sudo", "doas"):
+        if have(tool):
+            return [tool]
+    return []
 
 
 # --------------------------------------------------------------------------
@@ -284,39 +328,42 @@ class Installer:
         self.args = args
         self.dry = args.dry_run
         self.family, self.distro_name = detect_distro()
+        self.priv = priv_cmd()
         self.repo: Path | None = None
         self.tmp: Path | None = None
         self.sudo_ready = False
         self.backed_up = False
         self.unavailable: list[str] = []
-        self.build_dirs: list[Path] = []
         self.fresh = args.mode == "fresh"
         self.minimal = args.mode == "minimal" or args.minimal
 
     # ---- plumbing --------------------------------------------------------
 
-    def run(self, argv: list[str], *, sudo: bool = False, cwd: Path | None = None,
-            env: dict | None = None) -> None:
+    def run(self, argv: list[str], *, sudo: bool = False, cwd: Path | None = None) -> None:
         """Run a command that changes the system (honours --dry-run)."""
         if sudo:
-            if not have("sudo") and not self.dry:
-                raise Fail("sudo is required")
-            argv = ["sudo", *argv]
+            if not self.priv and not self.dry:
+                hint = ""
+                if self.family == "void":
+                    hint = " (as root: xbps-install -S sudo, then add your user to the wheel group)"
+                raise Fail("sudo or doas is required" + hint)
+            argv = [*(self.priv or ["sudo"]), *argv]
         rendered = " ".join(shlex.quote(a) for a in argv)
         if self.dry:
             info(f"[dry-run] {rendered}")
             return
-        if sudo and not self.sudo_ready:
+        if sudo and self.priv == ["sudo"] and not self.sudo_ready:
             if subprocess.run(["sudo", "-v"]).returncode != 0:
                 raise Fail("sudo authentication failed")
             self.sudo_ready = True
         if _log:
             _log.write(f"$ {rendered}\n")
-        if subprocess.run(argv, cwd=cwd, env=env).returncode != 0:
+        if subprocess.run(argv, cwd=cwd).returncode != 0:
             raise Fail(f"command failed: {rendered}")
 
-    def ask(self, prompt: str, default: bool = True) -> bool:
-        if self.args.assume_yes:
+    def ask(self, prompt: str, default: bool = True, auto: bool = True) -> bool:
+        """Yes/no question. `auto=False` ignores --yes (used for anything destructive)."""
+        if self.args.assume_yes and auto:
             return True
         if not sys.stdin.isatty():
             return default
@@ -393,6 +440,8 @@ class Installer:
             specs += parse_specs(FRESH)
         return specs
 
+    # Arch
+
     def plan_arch(self) -> tuple[list[str], list[str]]:
         names = list(dict.fromkeys(a for a, _ in self.wanted() if a != "-"))
         known = set(query(["pacman", "-Slq"]).split())
@@ -404,181 +453,6 @@ class Installer:
         # `pacman -T` prints only the names that are NOT installed.
         todo = query(["pacman", "-T", *found]).split()
         return todo, missing
-
-    def deb_state(self, names: list[str]) -> dict[str, tuple[bool, bool]]:
-        """name -> (installed, installable) from a single apt-cache call."""
-        state: dict[str, tuple[bool, bool]] = {}
-        cur, inst, cand = None, False, False
-        for line in query(["apt-cache", "policy", *names]).splitlines():
-            if line and not line.startswith(" "):
-                if cur:
-                    state[cur] = (inst, cand)
-                cur, inst, cand = line.rstrip(":").strip(), False, False
-            elif "Installed:" in line:
-                inst = "(none)" not in line
-            elif "Candidate:" in line:
-                cand = "(none)" not in line
-        if cur:
-            state[cur] = (inst, cand)
-        return state
-
-    def plan_debian(self) -> tuple[list[str], list[str]]:
-        groups: list[list[list[str]]] = []  # package -> required parts -> alternatives
-        labels: list[str] = []
-        for arch, deb in self.wanted():
-            if deb == ".":
-                continue
-            if deb == "-":
-                labels.append(arch)
-                groups.append([])
-                continue
-            labels.append(arch if arch != "-" else deb)
-            groups.append([part.split("|") for part in deb.split(",")])
-
-        flat = sorted({alt for g in groups for part in g for alt in part})
-        state = self.deb_state(flat)
-        if not any(c for _, c in state.values()) and not self.dry:
-            self.run(["apt-get", "update"], sudo=True)  # empty package lists
-            state = self.deb_state(flat)
-
-        todo: list[str] = []
-        missing: list[str] = []
-        for label, g in zip(labels, groups):
-            if not g:
-                missing.append(label)
-                continue
-            for part in g:
-                pick = next((a for a in part if state.get(a, (False, False))[1]
-                             or state.get(a, (False, False))[0]), None)
-                if pick is None:
-                    missing.append(label)
-                elif not state[pick][0]:
-                    todo.append(pick)
-        return list(dict.fromkeys(todo)), list(dict.fromkeys(missing))
-
-    # ---- Debian: build what isn't packaged -------------------------------
-
-    def apt_deps(self, pkgs: list[str]) -> None:
-        state = self.deb_state(pkgs)
-        gone = [p for p in pkgs if not any(state.get(p, (False, False)))]
-        if gone:
-            raise Fail("missing from your repositories: " + ", ".join(gone)
-                       + " (a newer Debian or Ubuntu release may have them)")
-        todo = [p for p in pkgs if not state[p][0]]
-        if todo:
-            self.run(["apt-get", "install", *(["-y"] if self.args.assume_yes else []), *todo],
-                     sudo=True)
-
-    def fetch_source(self, url: str, tags: str = "v*") -> Path:
-        tmp = Path(tempfile.mkdtemp(prefix="build-"))
-        self.build_dirs.append(tmp)
-        tag = query(["git", "ls-remote", "--tags", "--refs", "--sort=-v:refname", url, tags])
-        branch = ["--branch", tag.splitlines()[0].split("refs/tags/")[-1]] if tag.strip() else []
-        self.run(["git", "-c", "advice.detachedHead=false", "clone", "-q", "--depth", "1",
-                  *branch, url, str(tmp / "src")])
-        return tmp / "src"
-
-    def rust_env(self, minimum: tuple[int, int]) -> dict:
-        """Environment with a Rust toolchain at least `minimum` (installs rustup if needed)."""
-        env = dict(os.environ)
-        cargo_home = Path(os.environ.get("CARGO_HOME") or HOME / ".cargo")
-        env["PATH"] = f"{cargo_home / 'bin'}{os.pathsep}{SYSPATH}"
-
-        def current() -> tuple[int, int]:
-            m = re.search(r"rustc (\d+)\.(\d+)", query(["rustc", "--version"], env=env))
-            return (int(m[1]), int(m[2])) if m else (0, 0)
-
-        if current() < minimum:
-            info("installing the Rust toolchain (rustup)")
-            self.run(["sh", "-c", "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs"
-                      " | sh -s -- -y --profile minimal"],
-                     env={**env, "RUSTUP_INIT_SKIP_PATH_CHECK": "yes"})
-            if current() < minimum:
-                raise Fail(f"could not get Rust {minimum[0]}.{minimum[1]} or newer")
-        return env
-
-    @staticmethod
-    def msrv(src: Path, default: tuple[int, int] = (1, 85)) -> tuple[int, int]:
-        try:
-            m = re.search(r'rust-version\s*=\s*"(\d+)\.(\d+)', (src / "Cargo.toml").read_text())
-        except OSError:
-            m = None
-        return (int(m[1]), int(m[2])) if m else default
-
-    def build_niri(self) -> None:
-        self.apt_deps(BUILD_BASE + NIRI_DEPS)
-        src = self.fetch_source("https://github.com/YaLTeR/niri")
-        env = self.rust_env(self.msrv(src))
-        self.run(["cargo", "build", "--release", "--locked"], cwd=src, env=env)
-        res = src / "resources"
-        for mode, source, dest in (
-            ("755", src / "target/release/niri", "/usr/local/bin/niri"),
-            ("755", res / "niri-session", "/usr/local/bin/niri-session"),
-            ("644", res / "niri.desktop", "/usr/local/share/wayland-sessions/niri.desktop"),
-            ("644", res / "niri-portals.conf",
-             "/usr/local/share/xdg-desktop-portal/niri-portals.conf"),
-            ("644", res / "niri.service", "/etc/systemd/user/niri.service"),
-            ("644", res / "niri-shutdown.target", "/etc/systemd/user/niri-shutdown.target"),
-        ):
-            self.run(["install", f"-Dm{mode}", str(source), dest], sudo=True)
-
-    def build_xwayland_satellite(self) -> None:
-        self.apt_deps(BUILD_BASE + XWAYLAND_DEPS)
-        src = self.fetch_source("https://github.com/Supreeeme/xwayland-satellite")
-        env = self.rust_env(self.msrv(src))
-        self.run(["cargo", "build", "--release", "--locked"], cwd=src, env=env)
-        self.run(["install", "-Dm755", str(src / "target/release/xwayland-satellite"),
-                  "/usr/local/bin/xwayland-satellite"], sudo=True)
-
-    def build_awww(self) -> None:
-        self.apt_deps(BUILD_BASE + AWWW_DEPS)
-        src = self.fetch_source("https://codeberg.org/LGFae/awww")
-        env = self.rust_env(self.msrv(src))
-        self.run(["cargo", "build", "--release", "--locked"], cwd=src, env=env)
-        for name in ("awww", "awww-daemon"):
-            self.run(["install", "-Dm755", str(src / "target/release" / name),
-                      f"/usr/local/bin/{name}"], sudo=True)
-
-    def build_quickshell(self) -> None:
-        qt = re.search(r"Candidate: (?:\d+:)?(\d+)\.(\d+)",
-                       query(["apt-cache", "policy", "qt6-base-dev"]))
-        if not qt or (int(qt[1]), int(qt[2])) < (6, 6):
-            raise Fail("needs Qt 6.6 or newer (Debian 13 / Ubuntu 25.04 and up)")
-        self.apt_deps(BUILD_BASE + QUICKSHELL_DEPS)
-        src = self.fetch_source("https://github.com/quickshell-mirror/quickshell")
-        self.run(["cmake", "-GNinja", "-B", "build", "-DCMAKE_BUILD_TYPE=Release",
-                  "-DCRASH_HANDLER=OFF", "-DSERVICE_POLKIT=OFF",
-                  f"-DDISTRIBUTOR={NAME} installer"], cwd=src)
-        self.run(["cmake", "--build", "build"], cwd=src)
-        self.run(["cmake", "--install", "build"], cwd=src, sudo=True)
-
-    def build_tuigreet(self) -> None:
-        self.apt_deps(BUILD_BASE)
-        env = self.rust_env((1, 85))
-        root = Path(tempfile.mkdtemp(prefix="tuigreet-"))
-        self.build_dirs.append(root)
-        self.run(["cargo", "install", "--locked", "--root", str(root), "tuigreet"], env=env)
-        self.run(["install", "-Dm755", str(root / "bin/tuigreet"), "/usr/local/bin/tuigreet"],
-                 sudo=True)
-
-    def build_missing(self) -> None:
-        todo = [t for t in ("niri", "xwayland-satellite", "quickshell", "awww") if not have(t)]
-        if self.fresh and not have("tuigreet"):
-            todo.append("tuigreet")
-        if not todo:
-            return
-        head("Building from source")
-        info("not packaged for this system: " + ", ".join(todo))
-        info("this can take a while")
-        for name in todo:
-            if self.dry:
-                info(f"[dry-run] build {name}")
-                continue
-            try:
-                getattr(self, "build_" + name.replace("-", "_"))()
-                ok(name)
-            except Fail as exc:
-                warn(f"{name}: {exc}")
 
     def aur_helper(self) -> str | None:
         return next((h for h in ("yay", "paru") if have(h)), None)
@@ -606,30 +480,142 @@ class Installer:
         self.run([helper, "-S", "--needed", *todo])
         ok(f"AUR: {', '.join(todo)}")
 
+    # Void
+
+    @staticmethod
+    def void_name(pkgver: str) -> str:
+        return pkgver.rsplit("-", 1)[0]
+
+    def void_known(self, names: list[str]) -> dict[str, bool]:
+        """name -> installed, for the names present in the repository index."""
+        esc = [re.sub(r"([.+])", r"\\\1", n) for n in names]
+        found: dict[str, bool] = {}
+        for line in query(["xbps-query", "-R", "--regex", "-s", "^(" + "|".join(esc) + ")$"]
+                          ).splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] in ("[*]", "[-]"):
+                found[self.void_name(parts[1])] = parts[0] == "[*]"
+        return found
+
+    def plan_void(self) -> tuple[list[str], list[str]]:
+        names: list[str] = []
+        missing: list[str] = []
+        for arch, void in self.wanted():
+            if void == ".":
+                continue
+            if void == "-":
+                missing.append(arch)
+            else:
+                names.append(void)
+        names = list(dict.fromkeys(names))
+
+        installed = set()
+        for line in query(["xbps-query", "-l"]).splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                installed.add(self.void_name(parts[1]))
+        todo = [n for n in names if n not in installed]
+
+        if todo:
+            known = self.void_known(todo)
+            if not known and not self.dry:  # index never synced
+                self.run(["xbps-install", "-S", *(["-y"] if self.args.assume_yes else [])],
+                         sudo=True)
+                known = self.void_known(todo)
+            if known:
+                missing += [n for n in todo if n not in known]
+                todo = [n for n in todo if n in known]
+        return todo, missing
+
+    def install_void(self) -> None:
+        yes = ["-y"] if self.args.assume_yes else []
+        todo, missing = self.plan_void()
+        if todo:
+            info(f"installing {len(todo)} package(s)")
+            try:
+                self.run(["xbps-install", "-Su", *yes], sudo=True)
+            except Fail:  # xbps itself must be updated first
+                self.run(["xbps-install", "-u", *yes, "xbps"], sudo=True)
+                self.run(["xbps-install", "-Su", *yes], sudo=True)
+            try:
+                self.run(["xbps-install", *yes, *todo], sudo=True)
+            except Fail:
+                warn("bulk install failed; retrying packages one by one")
+                failed = []
+                for pkg in todo:
+                    try:
+                        self.run(["xbps-install", *yes, pkg], sudo=True)
+                    except Fail:
+                        failed.append(pkg)
+                missing += failed
+                todo = [p for p in todo if p not in failed]
+        ok(f"{len(todo)} installed, rest already present" if todo else "all present")
+        self.unavailable += missing
+        self.install_nerd_font()
+        self.ensure_niri_session()
+
+    def install_nerd_font(self) -> None:
+        """Void has no package for Atkinson Hyperlegible Mono Nerd Font; fetch just that one."""
+        label = "Atkinson Hyperlegible Mono Nerd Font"
+        if FONT_DIR.is_dir() and any(FONT_DIR.glob("*.[ot]tf")):
+            return
+        if re.search(r"atkinson.*mono.*nerd", query(["fc-list"]), re.I):
+            return
+        if self.dry:
+            info(f"[dry-run] download {label}")
+            return
+        try:
+            req = Request(NERD_FONT_URL, headers={"User-Agent": f"{NAME}-installer/{VERSION}"})
+            with urlopen(req, timeout=120) as resp:
+                data = resp.read()
+            FONT_DIR.mkdir(parents=True, exist_ok=True)
+            count = 0
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as tar:
+                for member in tar.getmembers():
+                    base = Path(member.name).name
+                    if member.isfile() and base.lower().endswith((".ttf", ".otf")):
+                        (FONT_DIR / base).write_bytes(tar.extractfile(member).read())
+                        count += 1
+            if not count:
+                raise Fail("archive contained no font files")
+            if have("fc-cache"):
+                query(["fc-cache", "-f", str(FONT_DIR)])
+            ok(label)
+        except (OSError, tarfile.TarError, Fail) as exc:
+            warn(f"could not install {label}: {exc}")
+            self.unavailable.append(label)
+
+    def ensure_niri_session(self) -> None:
+        """Void's niri package has no niri-session; install a launcher for it."""
+        if self.family != "void" or have("niri-session") or SESSION_BIN.exists():
+            return
+        fd, tmp = tempfile.mkstemp(suffix=".sh")
+        os.close(fd)
+        try:
+            Path(tmp).write_text(SESSION_SCRIPT)
+            self.run(["install", "-Dm755", tmp, str(SESSION_BIN)], sudo=True)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+        ok("niri-session launcher")
+
     def install_packages(self) -> None:
         if self.args.no_deps:
             return
         if not self.family:
-            raise Fail("unsupported system: need an Arch-based or Debian-based distro")
+            raise Fail("unsupported system: this installer supports Arch-based distros "
+                       "and Void Linux")
         head(f"Packages ({self.family})")
+        if self.family == "void":
+            self.install_void()
+            return
         yes = ["--noconfirm"] if self.args.assume_yes else []
-
-        if self.family == "arch":
-            todo, missing = self.plan_arch()
-            if todo:
-                info(f"installing {len(todo)} package(s)")
-                self.run(["pacman", "-Syu", "--needed", *yes, *todo], sudo=True)
-            ok(f"{len(todo)} installed, rest already present" if todo else "all present")
-            self.unavailable += missing
-            self.install_aur()
-        else:
-            todo, missing = self.plan_debian()
-            if todo:
-                info(f"installing {len(todo)} package(s)")
-                self.run(["apt-get", "install", *(["-y"] if yes else []), *todo], sudo=True)
-            ok(f"{len(todo)} installed, rest already present" if todo else "all present")
-            self.unavailable += missing + AUR
-            self.build_missing()
+        todo, missing = self.plan_arch()
+        if todo:
+            info(f"installing {len(todo)} package(s)")
+            self.run(["pacman", "-Syu", "--needed", *yes, *todo], sudo=True)
+        ok(f"{len(todo)} installed, rest already present" if todo else "all present")
+        self.unavailable += missing
+        self.install_aur()
 
     # ---- files -----------------------------------------------------------
 
@@ -739,20 +725,30 @@ class Installer:
                     fp.write(line)
         ok("~/.local/bin added to PATH")
 
+    @staticmethod
+    def dconf_cmd(argv: list[str]) -> list[str] | None:
+        """dconf needs a session bus; start a temporary one when there is none (TTY installs)."""
+        if os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+            return argv
+        if have("dbus-run-session"):
+            return ["dbus-run-session", "--", *argv]
+        return None
+
     def apply_dconf(self) -> None:
         assert self.repo
         src = self.repo / "dconf/interface.ini"
-        if not src.is_file() or not have("dconf") or not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        load = self.dconf_cmd(["dconf", "load", "/org/gnome/desktop/interface/"])
+        dump = self.dconf_cmd(["dconf", "dump", "/org/gnome/desktop/interface/"])
+        if not src.is_file() or not have("dconf") or not load or not dump:
             return
         if self.dry:
             info("[dry-run] load GTK interface settings")
             return
         BACKUP.mkdir(parents=True, exist_ok=True)
-        (BACKUP / "interface.dconf").write_text(
-            query(["dconf", "dump", "/org/gnome/desktop/interface/"]))
+        (BACKUP / "interface.dconf").write_text(query(dump))
         self.backed_up = True
         with src.open() as fp:
-            r = subprocess.run(["dconf", "load", "/org/gnome/desktop/interface/"], stdin=fp)
+            r = subprocess.run(load, stdin=fp)
         if r.returncode == 0:
             ok("GTK settings")
         else:
@@ -864,41 +860,31 @@ class Installer:
 
     # ---- services / login manager ---------------------------------------
 
-    def setup_services(self) -> None:
-        head("Services")
-        if not have("systemctl"):
-            warn("systemd not found; enable NetworkManager and Bluetooth yourself")
-        else:
-            for unit in ("NetworkManager.service", "bluetooth.service"):
-                if query(["systemctl", "list-unit-files", unit]).count(unit):
-                    self.run(["systemctl", "enable", unit], sudo=True)
-                    ok(f"enabled {unit}")
-
-        if not (have("greetd") and have("niri-session")):
+    def write_greetd(self, vt: int) -> bool:
+        """Write /etc/greetd/config.toml. Returns False when it cannot be set up."""
+        session = shutil.which("niri-session", path=SYSPATH) or (
+            str(SESSION_BIN) if SESSION_BIN.exists() else None)
+        if not (have("greetd") and session):
             warn("greetd or niri-session is missing; login manager not configured")
-            return
-        if not have("systemctl"):
-            warn("skipping greetd (needs systemd)")
-            return
+            return False
         if have("tuigreet"):
-            greeter = "tuigreet --time --remember --remember-session --asterisks --cmd niri-session"
+            greeter = f"tuigreet --time --remember --remember-session --asterisks --cmd {session}"
         elif have("agreety"):
-            greeter = "agreety --cmd niri-session"
+            greeter = f"agreety --cmd {session}"
             warn("tuigreet unavailable; using the plain agreety greeter")
         else:
             warn("no greeter found; login manager not configured")
-            return
-        user = next((u for u in ("greeter", "_greetd", "greetd")
-                     if query(["getent", "passwd", u]).strip()), "greeter")
+            return False
+        user = next((u for u in ("_greeter", "greeter", "_greetd", "greetd")
+                     if user_exists(u)), "greeter")
 
-        cfg = Path("/etc/greetd/config.toml")
-        if cfg.exists() and not self.dry:
+        if GREETD_CFG.exists() and not self.dry:
             target = BACKUP / "etc/greetd/config.toml"
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(cfg, target)
+            shutil.copy2(GREETD_CFG, target)
             self.backed_up = True
         text = (
-            "[terminal]\nvt = 1\n\n[default_session]\n"
+            f"[terminal]\nvt = {vt}\n\n[default_session]\n"
             f'command = "{greeter}"\n'
             f'user = "{user}"\n'
         )
@@ -906,14 +892,71 @@ class Installer:
         os.close(fd)
         try:
             Path(tmp).write_text(text)
-            self.run(["install", "-Dm644", tmp, str(cfg)], sudo=True)
+            self.run(["install", "-Dm644", tmp, str(GREETD_CFG)], sudo=True)
             if greeter.startswith("tuigreet"):
                 self.run(["install", "-d", "-o", user, "-g", user, "-m755",
                           "/var/cache/tuigreet"], sudo=True)
-            self.run(["systemctl", "enable", "--force", "greetd.service"], sudo=True)
         finally:
             Path(tmp).unlink(missing_ok=True)
         ok(f"greetd ({greeter.split()[0]}), session: niri")
+        return True
+
+    def setup_services_systemd(self) -> None:
+        if not have("systemctl"):
+            warn("systemd not found; enable NetworkManager and Bluetooth yourself")
+            return
+        for unit in ("NetworkManager.service", "bluetooth.service"):
+            if query(["systemctl", "list-unit-files", unit]).count(unit):
+                self.run(["systemctl", "enable", unit], sudo=True)
+                ok(f"enabled {unit}")
+        if self.write_greetd(vt=1):
+            self.run(["systemctl", "enable", "--force", "greetd.service"], sudo=True)
+
+    def sv_enabled(self, name: str) -> bool:
+        return lexists(SERVICE_DIR / name)
+
+    def enable_sv(self, name: str) -> bool:
+        """Enable a runit service by linking it into the service directory."""
+        if self.sv_enabled(name):
+            return True
+        if not self.dry and not (SV_DIR / name).is_dir():
+            warn(f"service {name} is not installed")
+            return False
+        self.run(["ln", "-s", str(SV_DIR / name), str(SERVICE_DIR / name)], sudo=True)
+        ok(f"enabled {name}")
+        return True
+
+    def setup_network_void(self) -> None:
+        if self.sv_enabled("NetworkManager"):
+            return
+        clash = [s for s in NET_CLASH if self.sv_enabled(s)]
+        if clash and not self.ask(
+                f"NetworkManager replaces {', '.join(clash)} (your connection restarts). "
+                "Switch now?", default=False, auto=False):
+            info("networking left as it is")
+            return
+        for name in clash:
+            self.run(["rm", "-f", str(SERVICE_DIR / name)], sudo=True)
+        self.enable_sv("NetworkManager")
+
+    def setup_services_void(self) -> None:
+        if not SERVICE_DIR.is_dir():
+            warn(f"{SERVICE_DIR} not found; enable dbus, elogind and greetd yourself")
+            return
+        self.ensure_niri_session()
+        for name in ("dbus", "elogind", "bluetoothd"):
+            self.enable_sv(name)
+        self.setup_network_void()
+        # vt 7: the default agetty services use tty1-6, so greetd never fights a login prompt.
+        if self.write_greetd(vt=7):
+            self.enable_sv("greetd")
+
+    def setup_services(self) -> None:
+        head("Services")
+        if self.family == "void":
+            self.setup_services_void()
+        else:
+            self.setup_services_systemd()
 
     # ---- verification ----------------------------------------------------
 
@@ -924,6 +967,12 @@ class Installer:
             warn("missing commands: " + ", ".join(gone))
         else:
             ok("core commands present")
+        if self.family == "void" and SERVICE_DIR.is_dir() and not self.dry:
+            off = [s for s in ("dbus", "elogind") if not self.sv_enabled(s)]
+            if off:
+                warn("services not enabled: " + ", ".join(off)
+                     + " (niri needs them; use Fresh system, or: sudo ln -s /etc/sv/NAME "
+                     "/var/service/)")
         wf = SHARE / "wallfliper/main.py"
         if wf.is_file() and have("python3") and not self.dry:
             r = subprocess.run(["python3", str(wf), "--check"], capture_output=True, text=True)
@@ -973,14 +1022,18 @@ class Installer:
         self.install_packages()
         self.apply_rice()
         if not self.args.no_deps:
-            self.setup_services()
+            try:
+                self.setup_services()
+            except (Fail, OSError) as exc:
+                warn(f"login manager setup failed: {exc}")
         self.verify()
-        if not self.dry and not self.args.skip_reboot and self.ask("Reboot now?", default=False):
-            self.run(["systemctl", "reboot"], sudo=True)
+        if (not self.dry and not self.args.skip_reboot
+                and self.ask("Reboot now?", default=False, auto=False)):
+            self.run(["systemctl", "reboot"] if have("systemctl") else ["reboot"], sudo=True)
 
     def execute(self) -> int:
         if os.geteuid() == 0:
-            raise Fail("do not run as root; sudo is used when needed")
+            raise Fail("do not run as root; sudo or doas is used when needed")
         mode = self.args.mode
         if mode == "menu":
             mode = self.menu()
@@ -1016,7 +1069,7 @@ class Installer:
             ("Update", "update",
              "Applies only the files the repo marks as shared. Your own changes stay."),
             ("Fresh system", "fresh",
-             "Everything in Install, plus the greetd login manager. For new setups."),
+             "Everything in Install, plus the login manager and system services."),
             ("Minimal", "minimal",
              "Core packages only (no extra apps), plus configs."),
             ("Configs only", "configs",
@@ -1047,14 +1100,14 @@ class Installer:
             out(f"Enter a number from 1 to {len(options)}, or q.")
 
     def cleanup(self) -> None:
-        for d in [self.tmp, *self.build_dirs]:
-            if d:
-                shutil.rmtree(d, ignore_errors=True)
+        if self.tmp:
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="install.sh", description=f"{NAME} installer")
-    p.add_argument("--fresh", action="store_true", help="fresh system setup (adds greetd)")
+    p.add_argument("--fresh", action="store_true",
+                   help="fresh system setup (adds login manager and services)")
     p.add_argument("--minimal", action="store_true", help="core packages only")
     p.add_argument("--update", dest="mode", action="store_const", const="update",
                    help="apply shared updates from the repository")
