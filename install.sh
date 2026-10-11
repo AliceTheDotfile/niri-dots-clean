@@ -114,6 +114,7 @@ python-pillow:python3-Pillow python-textual:python3-textual jq rsync git
 ttf-hack:font-hack-ttf noto-fonts:noto-fonts-ttf noto-fonts-emoji
 otf-atkinsonhyperlegiblemono-nerd:. woff2-font-awesome:font-awesome6 upower
 -:dbus -:elogind -:mesa-dri -:mpvpaper
+-:python3-pyside6-gui -:python3-pyside6-widgets -:python3-pyside6-declarative
 """
 
 EXTRA = """
@@ -559,7 +560,7 @@ class Installer:
         label = "Atkinson Hyperlegible Mono Nerd Font"
         if FONT_DIR.is_dir() and any(FONT_DIR.glob("*.[ot]tf")):
             return
-        if re.search(r"atkinson.*mono.*nerd", query(["fc-list"]), re.I):
+        if re.search(r"atk[iy]nson.*mono.*nerd", query(["fc-list"]), re.I):
             return
         if self.dry:
             info(f"[dry-run] download {label}")
