@@ -63,7 +63,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 NAME = "niri-dots-clean"
-VERSION = "3.1.0"
+VERSION = "3.1.1"
 ARCHIVE_URL = (
     "https://codeload.github.com/AliceTheDotfile/niri-dots-clean/"
     "tar.gz/refs/heads/main"
@@ -72,12 +72,18 @@ NERD_FONT_URL = (
     "https://github.com/ryanoasis/nerd-fonts/releases/latest/download/"
     "AtkinsonHyperlegibleMono.tar.xz"
 )
+JETBRAINS_NERD_FONT_URL = (
+    "https://github.com/ryanoasis/nerd-fonts/releases/latest/download/"
+    "JetBrainsMono.tar.xz"
+)
 
 HOME = Path.home()
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
 SHARE = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share")
 BIN = HOME / ".local/bin"
 FONT_DIR = SHARE / "fonts/AtkinsonHyperlegibleMonoNerd"
+JETBRAINS_FONT_DIR = SHARE / "fonts/JetBrainsMonoNerd"
+APPLICATIONS_DIR = SHARE / "applications"
 
 STAMP = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 BACKUP = HOME / ".dotfiles-backup" / STAMP
@@ -107,14 +113,18 @@ CORE = """
 niri xwayland-satellite quickshell kitty swaync:SwayNotificationCenter wofi
 kate qt6ct nwg-look kvantum layer-shell-qt papirus-icon-theme dconf awww mpv
 ffmpeg pyside6:python3-pyside6 pipewire pipewire-pulse:. wireplumber playerctl
-pavucontrol brightnessctl grim slurp wl-clipboard xdg-utils xdg-user-dirs
+cpupower pavucontrol brightnessctl grim slurp wl-clipboard xdg-utils xdg-user-dirs
 xdg-desktop-portal xdg-desktop-portal-gtk networkmanager:NetworkManager
 network-manager-applet bluez bluez-utils:. blueman python:python3
 python-pillow:python3-Pillow python-textual:python3-textual jq rsync git
-ttf-hack:font-hack-ttf noto-fonts:noto-fonts-ttf noto-fonts-emoji
+ttf-hack:font-hack-ttf ttf-jetbrains-mono-nerd:.
+noto-fonts:noto-fonts-ttf noto-fonts-emoji
 otf-atkinsonhyperlegiblemono-nerd:. woff2-font-awesome:font-awesome6 upower
+xfce4-power-manager
 -:dbus -:elogind -:mesa-dri -:mpvpaper
 -:python3-pyside6-gui -:python3-pyside6-widgets -:python3-pyside6-declarative
+-:python3-pyside6-dbus -:python3-pyside6-network -:python3-pyside6-svg -:python3-pyside6-opengl-widgets
+-:python3-pyside6-multimedia -:python3-pyside6-concurrent -:python3-pyside6-xml -:python3-pyside6-sql
 """
 
 EXTRA = """
@@ -140,7 +150,8 @@ HOME_ITEMS = [
 
 REQUIRED = ["niri", "quickshell/my-shell", "wallfliper", "local/bin", "Wallpapers"]
 
-VERIFY = ["niri", "niri-session", "quickshell", "kitty", "kate", "awww", "mpv", "ffmpeg"]
+VERIFY = ["niri", "niri-session", "quickshell", "kitty", "kate", "awww", "mpv", "ffmpeg",
+          "xfce4-power-manager"]
 
 # Void: services that clash with NetworkManager.
 NET_CLASH = ("dhcpcd", "wpa_supplicant", "dhcpcd-eth0")
@@ -519,9 +530,11 @@ class Installer:
 
         if todo:
             known = self.void_known(todo)
-            if not known and not self.dry:  # index never synced
-                self.run(["xbps-install", "-S", *(["-y"] if self.args.assume_yes else [])],
-                         sudo=True)
+            # Refresh if ANY requested package is absent from the local repo index.
+            # This matters for split packages (including PySide6) added since the
+            # last sync; an index with some matches is not necessarily current.
+            if len(known) < len(todo) and not self.dry:
+                self.run(["xbps-install", "-S", *( ["-y"] if self.args.assume_yes else [])], sudo=True)
                 known = self.void_known(todo)
             if known:
                 missing += [n for n in todo if n not in known]
@@ -553,38 +566,61 @@ class Installer:
         ok(f"{len(todo)} installed, rest already present" if todo else "all present")
         self.unavailable += missing
         self.install_nerd_font()
+        self.install_quickshell_font()
         self.ensure_niri_session()
 
-    def install_nerd_font(self) -> None:
-        """Void has no package for Atkinson Hyperlegible Mono Nerd Font; fetch just that one."""
-        label = "Atkinson Hyperlegible Mono Nerd Font"
-        if FONT_DIR.is_dir() and any(FONT_DIR.glob("*.[ot]tf")):
+    def install_font_archive(self, url: str, label: str, destination: Path,
+                             installed_pattern: str) -> None:
+        """Download just the requested Nerd Font into the user's font directory."""
+        if destination.is_dir() and any(destination.glob("*.[ot]tf")):
             return
-        if re.search(r"atk[iy]nson.*mono.*nerd", query(["fc-list"]), re.I):
+        if re.search(installed_pattern, query(["fc-list"]), re.I):
             return
         if self.dry:
             info(f"[dry-run] download {label}")
             return
         try:
-            req = Request(NERD_FONT_URL, headers={"User-Agent": f"{NAME}-installer/{VERSION}"})
+            req = Request(url, headers={"User-Agent": f"{NAME}-installer/{VERSION}"})
             with urlopen(req, timeout=120) as resp:
                 data = resp.read()
-            FONT_DIR.mkdir(parents=True, exist_ok=True)
+            destination.mkdir(parents=True, exist_ok=True)
             count = 0
             with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as tar:
                 for member in tar.getmembers():
                     base = Path(member.name).name
-                    if member.isfile() and base.lower().endswith((".ttf", ".otf")):
-                        (FONT_DIR / base).write_bytes(tar.extractfile(member).read())
-                        count += 1
+                    if not member.isfile() or not base.lower().endswith((".ttf", ".otf")):
+                        continue
+                    source = tar.extractfile(member)
+                    if source is None:
+                        continue
+                    (destination / base).write_bytes(source.read())
+                    count += 1
             if not count:
                 raise Fail("archive contained no font files")
             if have("fc-cache"):
-                query(["fc-cache", "-f", str(FONT_DIR)])
+                query(["fc-cache", "-f", str(destination)])
             ok(label)
         except (OSError, tarfile.TarError, Fail) as exc:
             warn(f"could not install {label}: {exc}")
             self.unavailable.append(label)
+
+    def install_nerd_font(self) -> None:
+        """Install the Atkinson Hyperlegible Mono Nerd Font used by the rice."""
+        self.install_font_archive(
+            NERD_FONT_URL,
+            "Atkinson Hyperlegible Mono Nerd Font",
+            FONT_DIR,
+            r"Atkinson.*Mono.*Nerd Font",
+        )
+
+    def install_quickshell_font(self) -> None:
+        """Install JetBrains Mono Nerd Font, which the Quickshell UI explicitly uses."""
+        self.install_font_archive(
+            JETBRAINS_NERD_FONT_URL,
+            "JetBrains Mono Nerd Font (Quickshell)",
+            JETBRAINS_FONT_DIR,
+            r"JetBrainsMono Nerd Font",
+        )
 
     def ensure_niri_session(self) -> None:
         """Void's niri package has no niri-session; install a launcher for it."""
@@ -657,11 +693,79 @@ class Installer:
         except OSError:
             pass
 
+    def ensure_user_dirs(self) -> None:
+        """Create XDG directories this rice writes to or indexes."""
+        for path in (BIN, SHARE / "applications", SHARE / "fonts"):
+            if path.is_dir():
+                continue
+            if self.dry:
+                info(f"[dry-run] create {path}")
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+        ok("XDG user directories")
+
+    def write_desktop_entry(self, launcher: Path, *, name: str, comment: str,
+                            icon: str, categories: str) -> None:
+        """Create/update one user desktop entry, backing up existing content first."""
+        desktop = APPLICATIONS_DIR / f"{name.lower().replace(' ', '-')}.desktop"
+        escaped_launcher = str(launcher).replace("\\", "\\\\").replace('"', '\\"')
+        data = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            f"Name={name}\n"
+            f"Comment={comment}\n"
+            f'Exec="{escaped_launcher}"\n'
+            f"Icon={icon}\n"
+            "Terminal=false\n"
+            f"Categories={categories}\n"
+        )
+        try:
+            current = desktop.read_text(encoding="utf-8") if desktop.is_file() else None
+        except OSError:
+            current = None
+        if current == data:
+            return
+        self.backup(desktop)
+        if self.dry:
+            info(f"[dry-run] write {desktop}")
+            return
+        desktop.parent.mkdir(parents=True, exist_ok=True)
+        desktop.write_text(data, encoding="utf-8")
+        desktop.chmod(0o644)
+
     def install_configs(self) -> None:
         assert self.repo
         n = sum(self.place(self.repo / d, CONFIG / d) for d in CONFIG_DIRS)
         n += self.place(self.repo / "quickshell/my-shell", CONFIG / "quickshell/my-shell")
         ok(f"{n} config directories")
+        self.ensure_power_manager_startup()
+
+    def ensure_power_manager_startup(self) -> None:
+        """Ensure niri starts the installed power manager without duplicating the entry."""
+        config = CONFIG / "niri/config.kdl"
+        if not config.is_file():
+            return
+        try:
+            text = config.read_text(encoding="utf-8")
+        except OSError:
+            return
+        startup = 'spawn-at-startup "xfce4-power-manager"'
+        if startup in text:
+            return
+        # The @HOME@ token is replaced during copy, so match the kitty startup
+        # command by its stable prefix rather than its home-directory argument.
+        match = re.search(r'(?m)^(spawn-at-startup\s+"kitty".*)$', text)
+        if not match:
+            warn('power manager installed; add ' + startup + ' to niri config to autostart it')
+            return
+        updated = text[:match.end()] + "\n" + startup + text[match.end():]
+        # install_configs() already backed up the prior niri directory before
+        # copying this config, so don't overwrite that backup with this copy.
+        if self.dry:
+            info(f"[dry-run] enable power manager startup in {config}")
+            return
+        config.write_text(updated, encoding="utf-8")
+        ok("power manager autostart")
 
     def install_home(self) -> None:
         assert self.repo
@@ -673,13 +777,23 @@ class Installer:
         self.place(self.repo / "wallfliper", SHARE / "wallfliper")
         self.place(self.repo / "wallfliper/config.json", CONFIG / "wallfliper/config.json")
         launcher = BIN / "wallfliper"
-        if not (self.repo / "local/bin/wallfliper").exists() and not self.dry:
-            self.backup(launcher)
-            BIN.mkdir(parents=True, exist_ok=True)
-            launcher.write_text(
-                f'#!/usr/bin/env bash\nexec python3 "{SHARE / "wallfliper/main.py"}" "$@"\n'
-            )
-            self.make_executable(launcher)
+        if not (self.repo / "local/bin/wallfliper").exists():
+            if not self.dry:
+                self.backup(launcher)
+                BIN.mkdir(parents=True, exist_ok=True)
+                launcher.write_text(
+                    f'#!/usr/bin/env bash\nexec python3 "{SHARE / "wallfliper/main.py"}" "$@"\n'
+                )
+                self.make_executable(launcher)
+            else:
+                info(f"[dry-run] create {launcher}")
+        self.write_desktop_entry(
+            launcher,
+            name="Wallfliper",
+            comment="Choose a wallpaper",
+            icon="preferences-desktop-wallpaper",
+            categories="Graphics;Utility;",
+        )
         ok("wallfliper")
 
     def install_scripts(self) -> None:
@@ -757,6 +871,7 @@ class Installer:
 
     def apply_rice(self) -> None:
         head("Configuration")
+        self.ensure_user_dirs()
         self.install_configs()
         self.install_home()
         self.install_wallfliper()
@@ -968,6 +1083,32 @@ class Installer:
             warn("missing commands: " + ", ".join(gone))
         else:
             ok("core commands present")
+
+        # Report each runtime module independently: the Void package names are
+        # split, so a missing QtDBus/QtQml plugin should identify the exact import.
+        if have("python3"):
+            modules = (
+                "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
+                "PySide6.QtQml", "PySide6.QtDBus", "PySide6.QtNetwork",
+                "PySide6.QtSvg", "PySide6.QtOpenGLWidgets",
+                "PySide6.QtMultimedia", "PySide6.QtConcurrent", "PySide6.QtXml",
+                "PySide6.QtSql",
+            )
+            missing_modules = []
+            for module in modules:
+                check = subprocess.run(
+                    ["python3", "-c", f"import {module}"],
+                    capture_output=True, text=True, check=False,
+                )
+                if check.returncode == 0:
+                    ok(f"{module}")
+                else:
+                    detail = (check.stderr.strip().splitlines() or ["import failed"])[-1]
+                    warn(f"{module} unavailable: {detail}")
+                    missing_modules.append(module)
+            if missing_modules:
+                warn("some PySide6 modules are unavailable; check the matching split packages")
+
         if self.family == "void" and SERVICE_DIR.is_dir() and not self.dry:
             off = [s for s in ("dbus", "elogind") if not self.sv_enabled(s)]
             if off:
